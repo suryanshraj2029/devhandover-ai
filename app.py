@@ -1,0 +1,3283 @@
+import streamlit as st
+import fitz
+import re
+import pandas as pd
+import sqlite3
+import json
+import hashlib
+import hmac
+import secrets
+import os
+import textwrap
+import io
+import zipfile
+import tempfile
+import shutil
+from pathlib import Path
+from datetime import datetime, timedelta
+# ==========================================================
+# 1. PAGE CONFIGURATION
+# ==========================================================
+st.set_page_config(
+    page_title="DevHandover AI",
+    page_icon="📘",
+    layout="wide"
+)
+# ==========================================================
+# 1A. DARK PRODUCT UI THEME AND NAVIGATION
+# ==========================================================
+st.markdown("""
+<style>
+:root { --dha-bg:#0b1220; --dha-panel:#111c2e; --dha-panel2:#17243a; --dha-border:#263852; --dha-text:#e7eef8; --dha-muted:#9fb0c7; --dha-accent:#2dd4bf; --dha-accent2:#38bdf8; }
+.stApp { background: radial-gradient(circle at 85% 0%, #14243a 0%, #0b1220 42%, #080e19 100%); color:var(--dha-text); }
+[data-testid="stHeader"] { background:rgba(8,14,25,.82); }
+[data-testid="stSidebar"] { background:linear-gradient(180deg,#101b2d 0%,#0b1423 100%); border-right:1px solid var(--dha-border); }
+[data-testid="stSidebar"] a { color:#c8d7e9 !important; text-decoration:none; }
+[data-testid="stSidebar"] a:hover { color:var(--dha-accent) !important; }
+.block-container { padding-top:1.8rem; padding-bottom:3rem; max-width:1450px; }
+h1,h2,h3 { color:#f2f7ff !important; letter-spacing:-.025em; }
+h2 { padding-top:.35rem; }
+p, label, .stMarkdown { color:var(--dha-text); }
+[data-testid="stMetric"] { background:linear-gradient(145deg,#17263d,#101b2c); border:1px solid #2a3d58; border-radius:15px; padding:15px 17px; box-shadow:0 8px 24px rgba(0,0,0,.16); }
+[data-testid="stMetricLabel"] { color:#9fb0c7 !important; }
+[data-testid="stMetricValue"] { color:#f4fbff !important; }
+.stButton>button, .stDownloadButton>button, button[kind="primary"] { border:1px solid rgba(45,212,191,.42); border-radius:10px; background:linear-gradient(100deg,#0f766e,#0e7490); color:white; font-weight:650; transition:all .18s ease; }
+.stButton>button:hover, .stDownloadButton>button:hover { border-color:#5eead4; color:white; transform:translateY(-1px); }
+input, textarea, [data-baseweb="select"] > div { background-color:#142238 !important; border-color:#314762 !important; border-radius:9px !important; }
+[data-testid="stExpander"] { background:#111e31; border:1px solid #263a55; border-radius:12px; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border:1px solid #263a55; border-radius:10px; overflow:hidden; }
+hr { border-color:#263852 !important; }
+.dha-hero { background:linear-gradient(115deg,rgba(20,49,69,.98),rgba(16,35,57,.98) 58%,rgba(15,73,75,.88)); border:1px solid #2b5265; border-radius:20px; padding:25px 28px; margin:8px 0 20px 0; box-shadow:0 14px 38px rgba(0,0,0,.22); }
+.dha-eyebrow { color:#5eead4; font-size:12px; font-weight:800; letter-spacing:.16em; text-transform:uppercase; margin-bottom:8px; }
+.dha-title { color:#f4fbff; font-size:34px; line-height:1.15; font-weight:800; letter-spacing:-.04em; }
+.dha-subtitle { color:#b9cde0; font-size:15px; margin-top:9px; max-width:850px; }
+.dha-pill { display:inline-block; border:1px solid #347c79; background:rgba(13,148,136,.15); color:#99f6e4; border-radius:999px; padding:5px 11px; font-size:12px; font-weight:700; margin-top:15px; }
+.dha-nav-title { color:#5eead4; font-size:11px; font-weight:800; letter-spacing:.15em; text-transform:uppercase; margin:8px 0 10px 0; }
+.dha-nav a { display:block; padding:8px 10px; margin:3px 0; border-radius:8px; color:#c5d4e6 !important; background:rgba(255,255,255,.025); font-size:13px; }
+.dha-nav a:hover { background:rgba(45,212,191,.12); color:#99f6e4 !important; }
+.dha-section-note { color:#9fb0c7; font-size:13px; }
+</style>
+""", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown("<div class='dha-nav-title'>DEVHANDOVER AI</div>", unsafe_allow_html=True)
+    st.markdown("**Workspace navigation**")
+    st.markdown("""
+    <div class="dha-nav">
+      <a href="#workspace">01 · Workspace</a>
+      <a href="#documentation">02 · Documentation</a>
+      <a href="#knowledge-assistant">03 · Knowledge assistant</a>
+      <a href="#knowledge-gaps">04 · Knowledge gaps</a>
+      <a href="#knowledge-interview">05 · AI interview</a>
+      <a href="#evidence-verification">06 · Evidence verification</a>
+      <a href="#knowledge-map">07 · Knowledge map</a>
+      <a href="#expertise-map">08 · Expertise map</a>
+      <a href="#checkpoint-tracker">09 · Checkpoints</a>
+      <a href="#continuity-risk">10 · Continuity risk</a>
+      <a href="#readiness">11 · Successor readiness</a>
+      <a href="#project-history">12 · Project history</a>
+      <a href="#handover-package">13 · Handover package</a>
+      <a href="#successor-workspace">14 · Successor workspace</a>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("Knowledge continuity · Risk visibility · Confident handovers")
+# ==========================================================
+# 2. SQLITE DATABASE SETUP
+# ==========================================================
+DB_NAME = "devhandover.db"
+def get_connection():
+    connection = sqlite3.connect(DB_NAME)
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+# ==========================================================
+# 2B. BACKUP AND RESTORE UTILITIES
+# ==========================================================
+BACKUP_DIR = Path("backups")
+BACKUP_DIR.mkdir(exist_ok=True)
+BACKUP_INTERVAL_DAYS = 30
+
+
+def build_backup_archive():
+    """Create a consistent ZIP backup using SQLite's online backup API."""
+    if not Path(DB_NAME).exists():
+        raise FileNotFoundError("The project database does not exist yet.")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        snapshot_path = Path(temp_dir) / "devhandover.db"
+        source_connection = sqlite3.connect(DB_NAME)
+        destination_connection = sqlite3.connect(str(snapshot_path))
+        try:
+            source_connection.backup(destination_connection)
+        finally:
+            destination_connection.close()
+            source_connection.close()
+
+        integrity_connection = sqlite3.connect(str(snapshot_path))
+        integrity_result = integrity_connection.execute(
+            "PRAGMA integrity_check"
+        ).fetchone()[0]
+        integrity_connection.close()
+        if integrity_result != "ok":
+            raise sqlite3.DatabaseError("Database integrity check failed.")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"devhandover_backup_{timestamp}.zip"
+        metadata = {
+            "application": "DevHandover AI",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "database_file": "devhandover.db",
+            "backup_contents": "SQLite database including users, workspaces, extracted PDF text/pages, interviews, risks, readiness and handover records.",
+            "format_version": 1
+        }
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(snapshot_path, arcname="devhandover.db")
+            archive.writestr("backup_metadata.json", json.dumps(metadata, indent=2))
+        return backup_name, archive_buffer.getvalue()
+
+
+def save_automatic_backup():
+    """Create a local automatic backup if none exists or 30 days have passed."""
+    existing_backups = sorted(BACKUP_DIR.glob("devhandover_backup_*.zip"))
+    if existing_backups:
+        latest_backup = max(existing_backups, key=lambda item: item.stat().st_mtime)
+        last_backup_time = datetime.fromtimestamp(latest_backup.stat().st_mtime)
+        if datetime.now() - last_backup_time < timedelta(days=BACKUP_INTERVAL_DAYS):
+            return False, latest_backup.name
+
+    backup_name, backup_bytes = build_backup_archive()
+    backup_path = BACKUP_DIR / backup_name
+    backup_path.write_bytes(backup_bytes)
+    return True, backup_name
+
+
+def validate_backup_archive(backup_bytes):
+    """Validate ZIP structure, required database, integrity and app tables."""
+    with zipfile.ZipFile(io.BytesIO(backup_bytes), "r") as archive:
+        names = set(archive.namelist())
+        if "devhandover.db" not in names or "backup_metadata.json" not in names:
+            raise ValueError("This is not a valid DevHandover AI backup ZIP.")
+        metadata = json.loads(archive.read("backup_metadata.json").decode("utf-8"))
+        if metadata.get("application") != "DevHandover AI":
+            raise ValueError("The backup does not belong to DevHandover AI.")
+        database_bytes = archive.read("devhandover.db")
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
+        temp_file.write(database_bytes)
+
+    try:
+        check_connection = sqlite3.connect(str(temp_path))
+        integrity = check_connection.execute("PRAGMA integrity_check").fetchone()[0]
+        tables = {row[0] for row in check_connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        check_connection.close()
+        required_tables = {"users", "workspaces", "documents"}
+        if integrity != "ok" or not required_tables.issubset(tables):
+            raise ValueError("The backup database is damaged or incomplete.")
+        return temp_path
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def restore_backup_archive(backup_bytes):
+    """Create a safety copy, then atomically replace the active database."""
+    validated_database = validate_backup_archive(backup_bytes)
+    try:
+        safety_name, safety_bytes = build_backup_archive()
+        safety_path = BACKUP_DIR / f"before_restore_{safety_name}"
+        safety_path.write_bytes(safety_bytes)
+        os.replace(str(validated_database), DB_NAME)
+        return safety_path.name
+    finally:
+        validated_database.unlink(missing_ok=True)
+
+def create_knowledge_interview(workspace_id, topic, interviewee):
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        INSERT INTO knowledge_interviews (
+            workspace_id, topic, interviewee, status, created_at
+        ) VALUES (?, ?, ?, 'In Progress', ?)
+    """, (workspace_id, topic, interviewee, datetime.now().isoformat()))
+    interview_id = cursor.lastrowid
+    connection.commit()
+    connection.close()
+    return interview_id
+
+
+def save_interview_response(
+    interview_id, question, answer, completeness,
+    follow_up_question, structured_note
+):
+    connection = get_connection()
+    connection.execute("""
+        INSERT INTO interview_responses (
+            interview_id, question, answer, completeness,
+            follow_up_question, structured_note, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        interview_id, question, answer, completeness,
+        follow_up_question, structured_note, datetime.now().isoformat()
+    ))
+    connection.commit()
+    connection.close()
+
+
+def get_interview_display_number(workspace_id, interview_id):
+    """Return a workspace-local interview number without changing database IDs."""
+    connection = get_connection()
+    number = connection.execute("""
+        SELECT COUNT(*)
+        FROM knowledge_interviews
+        WHERE workspace_id = ? AND id <= ?
+    """, (workspace_id, interview_id)).fetchone()[0]
+    connection.close()
+    return number
+
+
+def get_interview_history(workspace_id):
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT ki.id, ki.topic, ki.interviewee, ki.status, ki.created_at,
+               ir.question, ir.answer, ir.completeness,
+               ir.follow_up_question, ir.structured_note, ir.created_at
+        FROM knowledge_interviews ki
+        LEFT JOIN interview_responses ir ON ki.id = ir.interview_id
+        WHERE ki.workspace_id = ?
+        ORDER BY ki.id DESC, ir.id ASC
+    """, (workspace_id,)).fetchall()
+    connection.close()
+    return rows
+
+
+def initialize_database():
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'Successor',
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            outgoing_employee TEXT NOT NULL,
+            successor TEXT NOT NULL,
+            deadline TEXT,
+            created_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER,
+            filename TEXT,
+            document_hash TEXT UNIQUE,
+            extracted_text TEXT,
+            pages_json TEXT,
+            created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS risk_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER,
+            risk_data TEXT,
+            average_risk REAL,
+            created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS readiness_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER,
+            readiness_score INTEGER,
+            completed_activities INTEGER,
+            technical_notes TEXT,
+            pending_tasks TEXT,
+            manager_name TEXT,
+            approved INTEGER DEFAULT 0,
+            created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_interviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            topic TEXT NOT NULL,
+            interviewee TEXT,
+            status TEXT DEFAULT 'In Progress',
+            created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS interview_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interview_id INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            completeness TEXT,
+            follow_up_question TEXT,
+            structured_note TEXT,
+            created_at TEXT,
+            FOREIGN KEY(interview_id) REFERENCES knowledge_interviews(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS successor_questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            successor_name TEXT,
+            question TEXT NOT NULL,
+            answer TEXT,
+            source_pages TEXT,
+            source_types TEXT,
+            created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS domain_expertise (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            knowledge_area TEXT NOT NULL,
+            team_member TEXT,
+            expertise_level TEXT,
+            is_primary TEXT,
+            backup_member TEXT,
+            evidence_notes TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handover_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            checkpoint TEXT NOT NULL,
+            description TEXT,
+            owner TEXT,
+            due_date TEXT,
+            status TEXT DEFAULT 'Planned',
+            evidence_notes TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    connection.commit()
+    connection.close()
+
+def hash_user_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 310000
+    ).hex()
+    return digest, salt
+
+def register_user(username, email, password, role):
+    password_hash, salt = hash_user_password(password)
+    connection = get_connection()
+    try:
+        connection.execute("""
+            INSERT INTO users (username, email, password_hash, password_salt, role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (username.strip(), email.strip().lower(), password_hash, salt,
+              role, datetime.now().isoformat()))
+        connection.commit()
+        return True, "Account created. You can now sign in."
+    except sqlite3.IntegrityError:
+        return False, "That username or email is already registered."
+    finally:
+        connection.close()
+
+def authenticate_user(username_or_email, password):
+    connection = get_connection()
+    user = connection.execute("""
+        SELECT id, username, email, password_hash, password_salt, role
+        FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE
+    """, (username_or_email.strip(), username_or_email.strip())).fetchone()
+    connection.close()
+    if not user:
+        return None
+    candidate, _ = hash_user_password(password, user[4])
+    if hmac.compare_digest(candidate, user[3]):
+        return {"id": user[0], "username": user[1], "email": user[2], "role": user[5]}
+    return None
+
+def get_user_count():
+    connection = get_connection()
+    count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    connection.close()
+    return count
+
+def get_domain_expertise(workspace_id):
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT knowledge_area, team_member, expertise_level, is_primary,
+               backup_member, evidence_notes
+        FROM domain_expertise WHERE workspace_id = ?
+        ORDER BY id
+    """, (workspace_id,)).fetchall()
+    connection.close()
+    columns = ["Knowledge Area", "Team Member", "Expertise Level",
+               "Role", "Backup Member", "Evidence / Notes"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def save_domain_expertise(workspace_id, dataframe):
+    connection = get_connection()
+    connection.execute("DELETE FROM domain_expertise WHERE workspace_id = ?", (workspace_id,))
+    for _, row in dataframe.iterrows():
+        area = str(row.get("Knowledge Area", "")).strip()
+        member = str(row.get("Team Member", "")).strip()
+        if not area or area.lower() == "nan":
+            continue
+        def clean(value):
+            value = str(value).strip()
+            return "" if value.lower() in ("nan", "none") else value
+        connection.execute("""
+            INSERT INTO domain_expertise (workspace_id, knowledge_area, team_member,
+                expertise_level, is_primary, backup_member, evidence_notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (workspace_id, area, clean(row.get("Team Member", "")),
+              clean(row.get("Expertise Level", "Not assessed")),
+              clean(row.get("Role", "Contributor")),
+              clean(row.get("Backup Member", "")),
+              clean(row.get("Evidence / Notes", "")), datetime.now().isoformat()))
+    connection.commit()
+    connection.close()
+
+
+def get_handover_checkpoints(workspace_id):
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT checkpoint, description, owner, due_date, status, evidence_notes
+        FROM handover_checkpoints WHERE workspace_id = ? ORDER BY id
+    """, (workspace_id,)).fetchall()
+    connection.close()
+    return pd.DataFrame(rows, columns=[
+        "Checkpoint", "Description", "Owner", "Due Date", "Status", "Evidence / Notes"
+    ])
+
+
+def save_handover_checkpoints(workspace_id, dataframe):
+    connection = get_connection()
+    connection.execute("DELETE FROM handover_checkpoints WHERE workspace_id = ?", (workspace_id,))
+    for _, row in dataframe.iterrows():
+        checkpoint = str(row.get("Checkpoint", "")).strip()
+        if not checkpoint or checkpoint.lower() == "nan":
+            continue
+        def clean_checkpoint(value):
+            value = str(value).strip()
+            return "" if value.lower() in ("nan", "none", "nat") else value
+        connection.execute("""
+            INSERT INTO handover_checkpoints
+            (workspace_id, checkpoint, description, owner, due_date, status, evidence_notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            workspace_id, checkpoint,
+            clean_checkpoint(row.get("Description", "")),
+            clean_checkpoint(row.get("Owner", "")),
+            clean_checkpoint(row.get("Due Date", "")),
+            clean_checkpoint(row.get("Status", "Planned")) or "Planned",
+            clean_checkpoint(row.get("Evidence / Notes", "")),
+            datetime.now().isoformat()
+        ))
+    connection.commit()
+    connection.close()
+
+
+def save_workspace(project, outgoing, successor, deadline):
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        INSERT INTO workspaces (
+            project_name,
+            outgoing_employee,
+            successor,
+            deadline,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        project,
+        outgoing,
+        successor,
+        str(deadline),
+        datetime.now().isoformat()
+    ))
+    workspace_id = cursor.lastrowid
+    connection.commit()
+    connection.close()
+    return workspace_id
+def get_workspace(workspace_id):
+    connection = get_connection()
+    result = connection.execute("""
+        SELECT id, project_name, outgoing_employee,
+               successor, deadline
+        FROM workspaces
+        WHERE id = ?
+    """, (workspace_id,)).fetchone()
+    connection.close()
+    return result
+def get_latest_workspace():
+    connection = get_connection()
+    result = connection.execute("""
+        SELECT id, project_name, outgoing_employee,
+               successor, deadline
+        FROM workspaces
+        ORDER BY id DESC
+        LIMIT 1
+    """).fetchone()
+    connection.close()
+    return result
+
+
+def get_all_workspaces():
+    """Return workspaces newest first for the workspace manager."""
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT id, project_name, outgoing_employee, successor, deadline
+        FROM workspaces
+        ORDER BY id DESC
+    """).fetchall()
+    connection.close()
+    return rows
+
+
+def delete_workspace_and_related_data(workspace_id):
+    """Delete one workspace and all records owned by it in one transaction."""
+    connection = get_connection()
+    try:
+        cursor = connection.cursor()
+
+        # interview_responses belongs to interviews, so remove it first.
+        cursor.execute("""
+            DELETE FROM interview_responses
+            WHERE interview_id IN (
+                SELECT id FROM knowledge_interviews WHERE workspace_id = ?
+            )
+        """, (workspace_id,))
+
+        # Remove all workspace-scoped records from the current app schema.
+        for table_name in (
+            "documents",
+            "risk_assessments",
+            "readiness_assessments",
+            "successor_questions",
+            "domain_expertise",
+            "handover_checkpoints",
+            "knowledge_interviews",
+        ):
+            cursor.execute(
+                f"DELETE FROM {table_name} WHERE workspace_id = ?",
+                (workspace_id,)
+            )
+
+        cursor.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+        deleted = cursor.rowcount
+
+        # Reset the workspace ID sequence only when every workspace is gone.
+        # This lets the next fresh workspace start at ID 1 without risking
+        # collisions with workspaces that still exist.
+        remaining_workspaces = cursor.execute(
+            "SELECT COUNT(*) FROM workspaces"
+        ).fetchone()[0]
+        if remaining_workspaces == 0:
+            cursor.execute(
+                "DELETE FROM sqlite_sequence WHERE name = 'workspaces'"
+            )
+
+        connection.commit()
+        return deleted > 0
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+def save_document(workspace_id, filename, document_hash,
+                  extracted_text, pages):
+    connection = get_connection()
+    connection.execute("""
+        INSERT OR IGNORE INTO documents (
+            workspace_id,
+            filename,
+            document_hash,
+            extracted_text,
+            pages_json,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        workspace_id,
+        filename,
+        document_hash,
+        extracted_text,
+        json.dumps(pages),
+        datetime.now().isoformat()
+    ))
+    connection.commit()
+    connection.close()
+def get_latest_document(workspace_id):
+    """Reload the latest saved PDF text and page data for a workspace."""
+    connection = get_connection()
+    row = connection.execute("""
+        SELECT document_hash, extracted_text, pages_json
+        FROM documents
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (workspace_id,)).fetchone()
+    connection.close()
+
+    if not row:
+        return None
+
+    try:
+        pages = json.loads(row[2] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        pages = []
+
+    return {
+        "document_hash": row[0],
+        "extracted_text": row[1] or "",
+        "pages": pages
+    }
+
+
+def activate_workspace_in_session(workspace_id):
+    """Load a selected workspace and its saved document into the current session."""
+    selected_workspace = get_workspace(workspace_id)
+    if not selected_workspace:
+        return False
+
+    # Remove state belonging to the previously active workspace so that
+    # assessments, interview answers, and generated outputs cannot leak across workspaces.
+    workspace_state_keys = [
+        "pages", "extracted_text", "document_hash", "risk_results",
+        "gemini_last_question", "gemini_last_answer", "gemini_last_sources",
+        "readiness_score", "readiness_data", "readiness_assessment_id",
+        "readiness_approved", "active_interview_id", "interview_pending_question",
+        "interview_structured_notes", "last_interview_evaluation",
+        "interview_topic_active", "handover_package_pdf",
+        "successor_workspace_question", "project_pdf"
+    ]
+    for state_key in workspace_state_keys:
+        st.session_state.pop(state_key, None)
+
+    st.session_state["workspace_id"] = selected_workspace[0]
+    st.session_state["workspace"] = {
+        "project": selected_workspace[1],
+        "outgoing": selected_workspace[2],
+        "successor": selected_workspace[3],
+        "deadline": selected_workspace[4]
+    }
+
+    saved_document = get_latest_document(selected_workspace[0])
+    if saved_document:
+        st.session_state["pages"] = saved_document["pages"]
+        st.session_state["extracted_text"] = saved_document["extracted_text"]
+        st.session_state["document_hash"] = saved_document["document_hash"]
+    return True
+
+
+def save_risk_assessment(workspace_id, risk_data):
+    connection = get_connection()
+    average_risk = float(
+        risk_data["Risk Score"].mean()
+    )
+    connection.execute("""
+        INSERT INTO risk_assessments (
+            workspace_id,
+            risk_data,
+            average_risk,
+            created_at
+        )
+        VALUES (?, ?, ?, ?)
+    """, (
+        workspace_id,
+        risk_data.to_json(orient="records"),
+        average_risk,
+        datetime.now().isoformat()
+    ))
+    connection.commit()
+    connection.close()
+def save_readiness_assessment(
+    workspace_id,
+    score,
+    completed,
+    technical_notes,
+    pending_tasks
+):
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        INSERT INTO readiness_assessments (
+            workspace_id,
+            readiness_score,
+            completed_activities,
+            technical_notes,
+            pending_tasks,
+            manager_name,
+            approved,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        workspace_id,
+        score,
+        completed,
+        technical_notes,
+        pending_tasks,
+        None,
+        0,
+        datetime.now().isoformat()
+    ))
+    assessment_id = cursor.lastrowid
+    connection.commit()
+    connection.close()
+    return assessment_id
+def approve_readiness(assessment_id, manager_name):
+    connection = get_connection()
+    connection.execute("""
+        UPDATE readiness_assessments
+        SET manager_name = ?, approved = 1
+        WHERE id = ?
+    """, (
+        manager_name,
+        assessment_id
+    ))
+    connection.commit()
+    connection.close()
+def get_saved_history(workspace_id):
+    connection = get_connection()
+    risks = pd.read_sql_query("""
+        SELECT id, average_risk, created_at
+        FROM risk_assessments
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, connection, params=(workspace_id,))
+    readiness = pd.read_sql_query("""
+        SELECT id, readiness_score, completed_activities,
+               manager_name, approved, created_at
+        FROM readiness_assessments
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, connection, params=(workspace_id,))
+    documents = pd.read_sql_query("""
+        SELECT id, filename, created_at
+        FROM documents
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, connection, params=(workspace_id,))
+    connection.close()
+    return risks, readiness, documents
+initialize_database()
+
+# Run the 30-day backup check whenever the app starts. The archive is stored locally.
+try:
+    automatic_backup_created, automatic_backup_name = save_automatic_backup()
+except Exception as backup_error:
+    automatic_backup_created = False
+    automatic_backup_name = None
+    st.warning(f"Automatic backup could not be completed: {backup_error}")
+
+# ==========================================================
+# 2A. USER AUTHENTICATION GATE
+# ==========================================================
+if "authenticated_user" not in st.session_state:
+    st.session_state["authenticated_user"] = None
+
+if not st.session_state["authenticated_user"]:
+    st.markdown("""
+    <div class="dha-hero">
+      <div class="dha-eyebrow">Secure project knowledge workspace</div>
+      <div class="dha-title">Welcome to DevHandover AI</div>
+      <div class="dha-subtitle">Sign in to manage project knowledge, handovers and continuity risks.</div>
+    </div>
+    """, unsafe_allow_html=True)
+    login_tab, register_tab = st.tabs(["Sign in", "Create account"])
+    with login_tab:
+        with st.form("dha_login_form"):
+            login_identity = st.text_input("Username or email")
+            login_password = st.text_input("Password", type="password")
+            login_submit = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        if login_submit:
+            user = authenticate_user(login_identity, login_password)
+            if user:
+                st.session_state["authenticated_user"] = user
+                st.success("Signed in successfully.")
+                st.rerun()
+            else:
+                st.error("Incorrect username/email or password.")
+    with register_tab:
+        if get_user_count() == 0:
+            st.info("The first registered account becomes the Admin account.")
+        else:
+            st.caption("New accounts can register as Outgoing Staff or Successor. Admin access is reserved for the first account.")
+        with st.form("dha_register_form"):
+            new_username = st.text_input("Choose a username", key="dha_new_username")
+            new_email = st.text_input("Email address", key="dha_new_email")
+            new_password = st.text_input("Create password", type="password", key="dha_new_password")
+            confirm_password = st.text_input("Confirm password", type="password")
+            if get_user_count() == 0:
+                new_role = "Admin"
+                st.text_input("Account role", value="Admin", disabled=True)
+            else:
+                new_role = st.selectbox("Account role", ["Outgoing Staff", "Successor"])
+            register_submit = st.form_submit_button("Create account", type="primary", use_container_width=True)
+        if register_submit:
+            if not new_username.strip() or not new_email.strip() or not new_password:
+                st.error("Please complete all fields.")
+            elif "@" not in new_email or "." not in new_email.split("@")[-1]:
+                st.error("Enter a valid email address.")
+            elif len(new_password) < 8:
+                st.error("Use a password with at least 8 characters.")
+            elif new_password != confirm_password:
+                st.error("The passwords do not match.")
+            else:
+                ok, message = register_user(new_username, new_email, new_password, new_role)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+    st.stop()
+
+# Authenticated user controls
+with st.sidebar:
+    signed_in_user = st.session_state["authenticated_user"]
+    st.markdown(f"**Signed in:** {signed_in_user['username']}")
+    st.caption(f"Role: {signed_in_user['role']}")
+    if st.button("Log out", use_container_width=True):
+        st.session_state["authenticated_user"] = None
+        st.rerun()
+
+# ==========================================================
+# 2C. BACKUP AND RESTORE CENTER
+# ==========================================================
+st.markdown("<div id='backup-center'></div>", unsafe_allow_html=True)
+with st.expander("🛡️ Backup & Restore Center", expanded=False):
+    st.subheader("Protect your DevHandover AI data")
+    st.write(
+        "Automatic backups are checked when the app starts. A new local backup "
+        "is created if no backup exists or the latest one is at least 30 days old."
+    )
+    if automatic_backup_created:
+        st.success(f"Automatic backup created: {automatic_backup_name}")
+    elif automatic_backup_name:
+        st.caption(f"Latest automatic backup: {automatic_backup_name}")
+    else:
+        st.caption("No automatic backup has been created yet.")
+
+    backup_col, restore_col = st.columns(2)
+    with backup_col:
+        st.markdown("**Manual backup**")
+        if st.button("Create backup now", key="create_manual_backup", type="primary"):
+            try:
+                manual_backup_name, manual_backup_bytes = build_backup_archive()
+                st.session_state["manual_backup_name"] = manual_backup_name
+                st.session_state["manual_backup_bytes"] = manual_backup_bytes
+                st.success("Backup is ready to download.")
+            except Exception as backup_error:
+                st.error(f"Could not create backup: {backup_error}")
+        if st.session_state.get("manual_backup_bytes"):
+            st.download_button(
+                "Download backup ZIP",
+                data=st.session_state["manual_backup_bytes"],
+                file_name=st.session_state["manual_backup_name"],
+                mime="application/zip",
+                key="download_manual_backup"
+            )
+
+    with restore_col:
+        st.markdown("**Restore from backup**")
+        restore_file = st.file_uploader(
+            "Choose a DevHandover AI backup ZIP",
+            type=["zip"],
+            key="restore_backup_upload"
+        )
+        confirm_restore = st.checkbox(
+            "I understand that restoring replaces the current database.",
+            key="confirm_backup_restore"
+        )
+        if st.button(
+            "Restore selected backup",
+            key="restore_backup_button",
+            disabled=(restore_file is None or not confirm_restore)
+        ):
+            try:
+                safety_copy_name = restore_backup_archive(restore_file.getvalue())
+                for state_key in (
+                    "workspace_id", "workspace", "pages", "extracted_text",
+                    "document_hash", "manual_backup_bytes", "manual_backup_name"
+                ):
+                    st.session_state.pop(state_key, None)
+                st.success(
+                    "Backup restored successfully. A safety copy of the previous "
+                    f"database was saved as {safety_copy_name}."
+                )
+                st.rerun()
+            except Exception as restore_error:
+                st.error(f"Restore failed: {restore_error}")
+
+    st.info(
+        "The backup contains the SQLite database, including extracted PDF text "
+        "and page records. The original uploaded PDF file itself is not currently "
+        "stored by this app, so it cannot be included unless you upload it again. "
+        "Keep downloaded backups in a secure location because they include account "
+        "and project information."
+    )
+
+# ==========================================================
+# 3. RESTORE LATEST WORKSPACE
+# ==========================================================
+if "workspace_id" not in st.session_state:
+    latest = get_latest_workspace()
+    if latest:
+        st.session_state["workspace_id"] = latest[0]
+        st.session_state["workspace"] = {
+            "project": latest[1],
+            "outgoing": latest[2],
+            "successor": latest[3],
+            "deadline": latest[4]
+        }
+
+        saved_document = get_latest_document(latest[0])
+        if saved_document:
+            st.session_state["pages"] = saved_document["pages"]
+            st.session_state["extracted_text"] = saved_document["extracted_text"]
+            st.session_state["document_hash"] = saved_document["document_hash"]
+def current_workspace_id():
+    return st.session_state.get("workspace_id")
+
+# Compact dashboard header and live workspace indicators.
+active_workspace_for_ui = st.session_state.get("workspace", {})
+active_project_for_ui = active_workspace_for_ui.get("project", "No workspace selected")
+active_status_for_ui = "WORKSPACE ACTIVE" if current_workspace_id() is not None else "SETUP REQUIRED"
+st.markdown(f"""
+<div class="dha-hero">
+  <div class="dha-eyebrow">AI-powered knowledge continuity platform</div>
+  <div class="dha-title">DevHandover AI</div>
+  <div class="dha-subtitle">Protect critical project knowledge, uncover continuity risks, and guide a structured transfer from outgoing employees to successors.</div>
+  <div class="dha-pill">● {active_status_for_ui} &nbsp; · &nbsp; {active_project_for_ui}</div>
+</div>
+""", unsafe_allow_html=True)
+
+# Workspace summary metrics are read-only and do not alter stored records.
+if current_workspace_id() is not None:
+    dashboard_connection = get_connection()
+    dashboard_counts = {}
+    for table_name, label in [
+        ("documents", "documents"),
+        ("knowledge_interviews", "interviews"),
+        ("handover_checkpoints", "checkpoints"),
+        ("successor_questions", "successor questions")
+    ]:
+        try:
+            dashboard_counts[label] = dashboard_connection.execute(
+                f"SELECT COUNT(*) FROM {table_name} WHERE workspace_id = ?",
+                (current_workspace_id(),)
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            dashboard_counts[label] = 0
+    dashboard_connection.close()
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("Documents", dashboard_counts["documents"])
+    metric_columns[1].metric("Knowledge interviews", dashboard_counts["interviews"])
+    metric_columns[2].metric("Handover checkpoints", dashboard_counts["checkpoints"])
+    metric_columns[3].metric("Successor questions", dashboard_counts["successor questions"])
+else:
+    st.info("Create a handover workspace to activate your project dashboard and tools.")
+
+st.divider()
+# ==========================================================
+# 4. HANDOVER WORKSPACE
+# ==========================================================
+st.markdown("<div id='workspace'></div>", unsafe_allow_html=True)
+st.header("1. Handover Workspace")
+with st.form("workspace_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        project_name = st.text_input("Project Name")
+        outgoing_employee = st.text_input("Outgoing Employee")
+    with col2:
+        successor = st.text_input("Successor / New Employee")
+        handover_deadline = st.date_input("Handover Deadline")
+    create_workspace = st.form_submit_button("Create Workspace")
+if create_workspace:
+    if (
+        project_name.strip()
+        and outgoing_employee.strip()
+        and successor.strip()
+    ):
+        workspace_id = save_workspace(
+            project_name,
+            outgoing_employee,
+            successor,
+            handover_deadline
+        )
+        st.session_state["workspace_id"] = workspace_id
+        st.session_state["workspace"] = {
+            "project": project_name,
+            "outgoing": outgoing_employee,
+            "successor": successor,
+            "deadline": str(handover_deadline)
+        }
+        # Clear old document and assessment state for the new workspace.
+        for key in [
+            "pages",
+            "extracted_text",
+            "document_hash",
+            "risk_results",
+            "gemini_last_question",
+            "gemini_last_answer",
+            "gemini_last_sources",
+            "readiness_score",
+            "readiness_data",
+            "readiness_assessment_id",
+            "readiness_approved",
+            "active_interview_id",
+            "interview_pending_question",
+            "interview_structured_notes",
+            "last_interview_evaluation",
+            "interview_topic_active"
+        ]:
+            st.session_state.pop(key, None)
+        st.success(
+            f"Workspace created and saved in SQLite! ID: {workspace_id}"
+        )
+    else:
+        st.warning("Please fill in all workspace fields.")
+if "workspace" in st.session_state:
+    workspace = st.session_state["workspace"]
+    st.success(
+        f"Active Workspace ID: {current_workspace_id()}"
+    )
+    st.info(
+        f"**Project:** {workspace['project']}  \n"
+        f"**Outgoing Employee:** {workspace['outgoing']}  \n"
+        f"**Successor:** {workspace['successor']}  \n"
+        f"**Deadline:** {workspace['deadline']}"
+    )
+else:
+    st.info("Create a workspace to begin.")
+
+# Workspace deletion is deliberately separated from workspace creation.
+with st.expander("Manage existing workspaces", expanded=False):
+    available_workspaces = get_all_workspaces()
+    if not available_workspaces:
+        st.caption("There are no saved workspaces to manage.")
+    else:
+        workspace_labels = {
+            row[0]: f"{row[1]} · {row[2]} → {row[3]} (ID: {row[0]})"
+            for row in available_workspaces
+        }
+
+        st.markdown("#### Switch Active Workspace")
+        active_id = current_workspace_id()
+        switch_options = list(workspace_labels.keys())
+        default_switch_index = (
+            switch_options.index(active_id) if active_id in switch_options else 0
+        )
+        selected_switch_id = st.selectbox(
+            "Choose the workspace you want to open",
+            options=switch_options,
+            index=default_switch_index,
+            format_func=lambda workspace_id: workspace_labels[workspace_id],
+            key="workspace_switch_select"
+        )
+        if active_id in workspace_labels:
+            st.caption(f"Currently active: {workspace_labels[active_id]}")
+        if st.button(
+            "Switch to selected workspace",
+            type="primary",
+            key="switch_workspace_button",
+            disabled=(selected_switch_id == active_id)
+        ):
+            try:
+                if activate_workspace_in_session(selected_switch_id):
+                    st.success("Active workspace changed. Its saved document and project data are loaded.")
+                    st.rerun()
+                else:
+                    st.error("The selected workspace could not be found. Refresh and try again.")
+            except Exception as switch_error:
+                st.error(f"Could not switch workspace: {switch_error}")
+
+        st.divider()
+        st.markdown("#### Delete a Workspace")
+        selected_delete_id = st.selectbox(
+            "Select a workspace",
+            options=list(workspace_labels.keys()),
+            format_func=lambda workspace_id: workspace_labels[workspace_id],
+            key="workspace_delete_select"
+        )
+        st.warning(
+            "Deleting a workspace permanently removes its uploaded-document "
+            "records, interviews and answers, risk/readiness assessments, "
+            "expertise records, checkpoints, and successor Q&A history. "
+            "This action cannot be undone."
+        )
+        confirm_workspace_delete = st.checkbox(
+            "I understand that this workspace and its related records will be permanently deleted.",
+            key="confirm_workspace_delete"
+        )
+        if st.button(
+            "Delete selected workspace",
+            type="secondary",
+            disabled=not confirm_workspace_delete,
+            key="delete_workspace_button"
+        ):
+            try:
+                deleted = delete_workspace_and_related_data(selected_delete_id)
+                if deleted:
+                    # Clear all state that may contain data from the deleted workspace.
+                    workspace_state_keys = [
+                        "workspace_id", "workspace", "pages", "extracted_text",
+                        "document_hash", "risk_results", "gemini_last_question",
+                        "gemini_last_answer", "gemini_last_sources",
+                        "readiness_score", "readiness_data",
+                        "readiness_assessment_id", "readiness_approved",
+                        "active_interview_id", "interview_pending_question",
+                        "interview_structured_notes", "last_interview_evaluation",
+                        "interview_topic_active", "handover_package_pdf",
+                        "successor_workspace_question"
+                    ]
+                    for state_key in workspace_state_keys:
+                        st.session_state.pop(state_key, None)
+
+                    # Restore the newest remaining workspace, if one exists.
+                    remaining_workspace = get_latest_workspace()
+                    if remaining_workspace:
+                        st.session_state["workspace_id"] = remaining_workspace[0]
+                        st.session_state["workspace"] = {
+                            "project": remaining_workspace[1],
+                            "outgoing": remaining_workspace[2],
+                            "successor": remaining_workspace[3],
+                            "deadline": remaining_workspace[4]
+                        }
+                        saved_document = get_latest_document(remaining_workspace[0])
+                        if saved_document:
+                            st.session_state["pages"] = saved_document["pages"]
+                            st.session_state["extracted_text"] = saved_document["extracted_text"]
+                            st.session_state["document_hash"] = saved_document["document_hash"]
+
+                    st.success("Workspace and its related records were deleted.")
+                    st.rerun()
+                else:
+                    st.error("The selected workspace could not be found.")
+            except Exception as error:
+                st.error("Workspace deletion failed. No partial deletion was saved.")
+                st.caption(f"Technical details: {error}")
+
+st.divider()
+# ==========================================================
+# 5. PDF UPLOAD AND EXTRACTION
+# ==========================================================
+st.markdown("<div id='documentation'></div>", unsafe_allow_html=True)
+st.header("2. Project Documentation Upload")
+uploaded_file = st.file_uploader(
+    "Upload Project Documentation (PDF)",
+    type=["pdf"],
+    key="project_pdf",
+    disabled=current_workspace_id() is None,
+    help="Create or restore a workspace before uploading documentation."
+)
+if uploaded_file is not None:
+    file_bytes = uploaded_file.getvalue()
+    document_hash = hashlib.sha256(
+        file_bytes
+    ).hexdigest()
+    # Process only when a new PDF is selected.
+    if st.session_state.get("document_hash") != document_hash:
+        try:
+            pdf_document = fitz.open(
+                stream=file_bytes,
+                filetype="pdf"
+            )
+            pages = []
+            for page_number, page in enumerate(
+                pdf_document,
+                start=1
+            ):
+                pages.append({
+                    "page": page_number,
+                    "text": page.get_text()
+                })
+            pdf_document.close()
+            extracted_text = "\n\n".join(
+                f"--- Page {page['page']} ---\n{page['text']}"
+                for page in pages
+            )
+            st.session_state["pages"] = pages
+            st.session_state["extracted_text"] = extracted_text
+            st.session_state["document_hash"] = document_hash
+            if extracted_text.strip():
+                save_document(
+                    current_workspace_id(),
+                    uploaded_file.name,
+                    document_hash,
+                    extracted_text,
+                    pages
+                )
+            st.success("PDF processed successfully!")
+        except Exception as error:
+            st.error(f"PDF processing error: {error}")
+    pages = st.session_state.get("pages", [])
+    extracted_text = st.session_state.get("extracted_text", "")
+    if extracted_text.strip():
+        col1, col2 = st.columns(2)
+        col1.metric("Total Pages", len(pages))
+        col2.metric("Extracted Characters", len(extracted_text))
+        with st.expander("View Extracted Text"):
+            st.text(extracted_text[:20000])
+        st.download_button(
+            "Download Extracted Text",
+            extracted_text,
+            file_name="project_documentation.txt",
+            mime="text/plain"
+        )
+    else:
+        st.warning(
+            "No selectable text found. This PDF may be scanned. "
+            "OCR is not included in this version."
+        )
+else:
+    pages = st.session_state.get("pages", [])
+    extracted_text = st.session_state.get("extracted_text", "")
+    if extracted_text.strip():
+        st.info("Previously uploaded document is available in this session.")
+pages = st.session_state.get("pages", [])
+extracted_text = st.session_state.get("extracted_text", "")
+
+st.divider()
+# ==========================================================
+# 6. GEMINI-POWERED PROJECT KNOWLEDGE ASSISTANT
+# ==========================================================
+st.markdown("<div id='knowledge-assistant'></div>", unsafe_allow_html=True)
+st.header("3. Gemini Project Knowledge Assistant")
+st.write(
+    "Ask questions in natural language. Gemini answers using relevant "
+    "passages from your uploaded project PDF and identifies the source pages."
+)
+
+st.caption("The app searches extracted PDF text using expanded keyword matching, then asks Gemini to answer only from the selected pages. Scanned PDFs need OCR.")
+def get_gemini_client():
+    """Create a Gemini client using the API key stored in .env."""
+    from dotenv import load_dotenv
+    from google import genai
+    from google.genai import types
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return None, None
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=120000)
+    )
+    return client, types
+def normalize_words(text):
+    """
+    Convert text into searchable words.
+    Important: use a real word-boundary regex (\\b).
+    """
+    text = (text or "").lower()
+    words = re.findall(r"\b[a-z0-9]+\b", text)
+    stop_words = {
+        "what", "where", "when", "which", "who", "why", "how",
+        "the", "is", "are", "was", "were", "in", "on", "at",
+        "to", "of", "for", "and", "a", "an", "does", "do",
+        "can", "could", "this", "that", "about", "with", "from",
+        "it", "our", "their", "please", "tell", "me", "explain",
+        "describe", "give", "show", "project"
+    }
+    return [word for word in words if word not in stop_words]
+
+
+def expand_query_terms(question):
+    """
+    Add common alternatives so natural-language questions can match
+    headings and terminology used in project documentation.
+    """
+    aliases = {
+        "architecture": {
+            "architecture", "architectural", "system design", "design",
+            "components", "modules", "workflow", "data flow",
+            "system flow", "structure", "high level design"
+        },
+        "technology": {
+            "technology", "technologies", "tech stack", "technology stack",
+            "framework", "language", "tools", "platform", "libraries"
+        },
+        "setup": {
+            "setup", "installation", "install", "configure", "configuration",
+            "getting started", "run", "running", "environment", "requirements"
+        },
+        "database": {
+            "database", "storage", "sqlite", "postgres", "postgresql",
+            "data storage", "tables", "schema"
+        },
+        "troubleshooting": {
+            "troubleshooting", "debugging", "errors", "issues", "problems",
+            "fix", "failure", "exception"
+        },
+        "roles": {
+            "roles", "responsibilities", "team", "owner", "ownership",
+            "primary owner", "backup owner", "team members"
+        },
+        "risk": {
+            "risk", "risks", "limitations", "known issues", "dependencies",
+            "single point of failure", "knowledge loss"
+        },
+        "decision": {
+            "decision", "decisions", "technical decisions", "tradeoffs",
+            "design choices", "rationale"
+        },
+    }
+
+    question_lower = (question or "").lower()
+    query_terms = set(normalize_words(question))
+
+    for concept, terms in aliases.items():
+        if concept in query_terms or any(term in question_lower for term in terms):
+            for term in terms:
+                query_terms.update(normalize_words(term))
+
+    return query_terms
+
+
+def retrieve_relevant_pages(question, document_pages, max_pages=8):
+    """
+    Retrieve likely source pages using normalized word matching,
+    phrase matching, and a safe fallback.
+
+    A fallback is intentional: a zero keyword score should not prevent
+    Gemini from checking the document. Gemini is instructed to say when
+    the supplied excerpts do not contain the answer.
+    """
+    if not question or not document_pages:
+        return []
+
+    query_terms = expand_query_terms(question)
+    question_lower = question.lower()
+    scored_pages = []
+
+    for item in document_pages:
+        page_text = item.get("text", "") or ""
+        page_lower = page_text.lower()
+        page_words = set(normalize_words(page_text))
+
+        overlap = query_terms.intersection(page_words)
+        score = len(overlap)
+
+        # Give extra weight to exact question phrases and useful headings.
+        for phrase in [
+            "project architecture", "system architecture", "system design",
+            "architecture", "data flow", "technology stack",
+            "installation", "troubleshooting", "team responsibilities",
+            "technical decisions", "risks and limitations"
+        ]:
+            if phrase in question_lower and phrase in page_lower:
+                score += 5
+            elif phrase in question_lower and any(
+                word in page_lower for word in phrase.split()
+            ):
+                score += 1
+
+        # Slightly prefer pages with a meaningful amount of extracted text.
+        if page_text.strip():
+            scored_pages.append({
+                "page": item.get("page"),
+                "score": score,
+                "text": page_text
+            })
+
+    scored_pages.sort(
+        key=lambda item: (item["score"], len(item["text"])),
+        reverse=True
+    )
+
+    matched_pages = [item for item in scored_pages if item["score"] > 0]
+
+    # If no terms matched, still let Gemini inspect a few non-empty pages.
+    # This avoids the misleading "no relevant passages" warning caused
+    # by keyword retrieval alone.
+    if not matched_pages:
+        matched_pages = sorted(
+            scored_pages,
+            key=lambda item: len(item["text"]),
+            reverse=True
+        )
+
+    return matched_pages[:max_pages]
+
+if pages:
+    question = st.text_input(
+        "Ask a project-related question",
+        placeholder="Example: What technologies are used and how do I run the project?",
+        key="gemini_project_question"
+    )
+    if st.button("Ask Gemini", type="primary", key="ask_gemini_button"):
+        if not question.strip():
+            st.warning("Enter a question first.")
+        else:
+            relevant_pages = retrieve_relevant_pages(question, pages)
+            if not relevant_pages:
+                st.warning(
+                    "No readable text was extracted from the uploaded PDF. "
+                    "If this is a scanned PDF, OCR is required before Gemini can search it."
+                )
+            else:
+                try:
+                    with st.spinner("Gemini is reading the relevant project pages..."):
+                        client, types = get_gemini_client()
+                        if client is None:
+                            st.error(
+                                "Gemini API key not found. Check that your .env "
+                                "file contains GEMINI_API_KEY=your_key and restart the app."
+                            )
+                        else:
+                            context_parts = []
+                            for item in relevant_pages:
+                                page_text = item["text"][:7000]
+                                context_parts.append(
+                                    f"--- SOURCE PAGE {item['page']} ---\n{page_text}"
+                                )
+                            document_context = "\n\n".join(context_parts)
+                            prompt = f"""
+You are DevHandover AI, a project documentation assistant.
+Answer the user's question using ONLY the source excerpts provided below.
+Do not use outside knowledge and do not invent missing details.
+If the excerpts do not contain enough information, clearly say:
+"The uploaded document does not provide enough information to answer this."
+You may explain what information is missing.
+Cite every factual claim with the source page number in this format: [Page 2].
+Only cite page numbers that appear in the supplied excerpts.
+Keep the answer clear, practical, and easy to understand.
+Do not claim that an action, test, deployment, or configuration happened
+unless the source explicitly says so.
+USER QUESTION:
+{question}
+SOURCE EXCERPTS:
+{document_context}
+"""
+                            response = client.models.generate_content(
+                                model="gemini-3.5-flash-lite",
+                                contents=prompt,
+                                config=types.GenerateContentConfig(
+                                    temperature=0.2,
+                                    max_output_tokens=700
+                                )
+                            )
+                            answer = (response.text or "").strip()
+                            if answer:
+                                st.session_state["gemini_last_question"] = question
+                                st.session_state["gemini_last_answer"] = answer
+                                st.session_state["gemini_last_sources"] = [
+                                    item["page"] for item in relevant_pages
+                                ]
+                            else:
+                                st.warning(
+                                    "Gemini returned an empty response. Please try again."
+                                )
+                except Exception as error:
+                    st.error(
+                        "Gemini could not answer this question. "
+                        "Check your internet connection, API quota, and model availability."
+                    )
+                    st.caption(f"Technical details: {error}")
+    if st.session_state.get("gemini_last_answer"):
+        st.subheader("Gemini's Answer")
+        st.markdown(st.session_state["gemini_last_answer"])
+        source_pages = st.session_state.get("gemini_last_sources", [])
+        if source_pages:
+            st.caption(
+                "Pages supplied to Gemini: "
+                + ", ".join(str(number) for number in source_pages)
+            )
+        st.caption(
+            "Answers are generated from retrieved PDF passages. Always verify "
+            "important handover decisions against the original document."
+        )
+else:
+    st.info("Upload a PDF to use the Gemini Knowledge Assistant.")
+st.divider()
+# ==========================================================
+# 7. KNOWLEDGE GAP DETECTOR
+# ==========================================================
+st.markdown("<div id='knowledge-gaps'></div>", unsafe_allow_html=True)
+st.header("4. Knowledge Gap Detector")
+required_topics = {
+    "Project Architecture": [
+        "architecture",
+        "system design",
+        "workflow"
+    ],
+    "Technology Stack": [
+        "technology stack",
+        "tech stack",
+        "technologies"
+    ],
+    "Installation & Setup": [
+        "installation",
+        "setup instructions",
+        "getting started"
+    ],
+    "Database & Dependencies": [
+        "database",
+        "dependencies",
+        "storage"
+    ],
+    "Troubleshooting": [
+        "troubleshooting",
+        "debugging",
+        "common errors"
+    ],
+    "Team Responsibilities": [
+        "team responsibilities",
+        "team members",
+        "roles",
+        "primary owner",
+        "backup owner",
+        "ownership map",
+        "domain owner"
+    ],
+    "Technical Decisions": [
+        "technical decisions",
+        "design decisions",
+        "decision"
+    ],
+    "Risks & Limitations": [
+        "risks",
+        "limitations",
+        "known issues"
+    ]
+}
+if pages:
+    if st.button("Analyze Knowledge Gaps"):
+        document_text = extracted_text.lower()
+        covered_topics = []
+        missing_topics = []
+        for topic, keywords in required_topics.items():
+            if any(
+                keyword in document_text
+                for keyword in keywords
+            ):
+                covered_topics.append(topic)
+            else:
+                missing_topics.append(topic)
+        col1, col2 = st.columns(2)
+        col1.metric("Topics Found", len(covered_topics))
+        col2.metric("Potential Knowledge Gaps", len(missing_topics))
+        st.subheader("Covered Topics")
+        for topic in covered_topics:
+            st.write(f"✅ {topic}")
+        st.subheader("Potential Knowledge Gaps")
+        for topic in missing_topics:
+            st.write(f"⚠️ {topic}")
+        st.caption(
+            "This is a preliminary keyword-based check. "
+            "Missing keywords do not prove information is absent."
+        )
+else:
+    st.info("Upload a PDF to analyze knowledge gaps.")
+st.divider()
+# ==========================================================
+# 8. PROJECT CONTINUITY RISK ENGINE
+# ==========================================================
+
+st.divider()
+# ==========================================================
+# 8. AI-GUIDED KNOWLEDGE INTERVIEW
+# ==========================================================
+st.markdown("<div id='knowledge-interview'></div>", unsafe_allow_html=True)
+st.header("5. AI-Guided Knowledge Interview")
+st.write(
+    "Interview the outgoing knowledge holder. Gemini creates focused questions, "
+    "checks whether each answer is sufficiently detailed, and asks follow-up questions."
+)
+
+if current_workspace_id() is None:
+    st.info("Create a workspace before starting a knowledge interview.")
+elif not pages:
+    st.info("Upload project documentation before starting the interview.")
+else:
+    interview_topic_options = [
+        "Project Architecture",
+        "Technology Stack",
+        "Installation & Setup",
+        "Database & Dependencies",
+        "Troubleshooting",
+        "Team Responsibilities",
+        "Technical Decisions",
+        "Risks & Limitations",
+        "Deployment & Operations",
+        "Critical Undocumented Knowledge"
+    ]
+
+    interview_col1, interview_col2 = st.columns(2)
+    with interview_col1:
+        interview_topic = st.selectbox(
+            "Knowledge area to interview",
+            interview_topic_options,
+            key="interview_topic"
+        )
+    with interview_col2:
+        default_interviewee = (
+            st.session_state.get("workspace", {}).get("outgoing", "")
+        )
+        interviewee = st.text_input(
+            "Knowledge holder / interviewee",
+            value=default_interviewee,
+            key="interviewee_name"
+        )
+
+    if "active_interview_id" not in st.session_state:
+        st.session_state["active_interview_id"] = None
+    if "interview_pending_question" not in st.session_state:
+        st.session_state["interview_pending_question"] = ""
+    if "interview_structured_notes" not in st.session_state:
+        st.session_state["interview_structured_notes"] = []
+
+    if st.button(
+        "Start New Interview",
+        type="primary",
+        disabled=not interviewee.strip(),
+        key="start_knowledge_interview"
+    ):
+        new_id = create_knowledge_interview(
+            current_workspace_id(), interview_topic, interviewee.strip()
+        )
+        st.session_state["active_interview_id"] = new_id
+        st.session_state["interview_topic_active"] = interview_topic
+        st.session_state["interview_pending_question"] = ""
+        st.session_state["interview_structured_notes"] = []
+        display_interview_number = get_interview_display_number(
+            current_workspace_id(), new_id
+        )
+        st.success(
+            f"Interview started. Interview ID: {display_interview_number}"
+        )
+
+    active_interview_id = st.session_state.get("active_interview_id")
+
+    if active_interview_id:
+        display_interview_number = get_interview_display_number(
+            current_workspace_id(), active_interview_id
+        )
+        st.caption(
+            f"Active interview #{display_interview_number} — "
+            f"{st.session_state.get('interview_topic_active', interview_topic)}"
+        )
+
+        pending_question = st.session_state.get("interview_pending_question", "")
+
+        # A new main question can only be generated when no follow-up is waiting.
+        if st.button(
+            "Generate Interview Question",
+            key="generate_interview_question",
+            disabled=bool(pending_question)
+        ):
+            try:
+                client, types = get_gemini_client()
+                if client is None:
+                    st.error("Gemini API key not found. Check your .env file.")
+                else:
+                    with st.spinner("Preparing a focused interview question..."):
+                        topic_pages = retrieve_relevant_pages(
+                            st.session_state.get("interview_topic_active", interview_topic),
+                            pages,
+                            max_pages=5
+                        )
+                        source_context = "\n\n".join(
+                            f"[Page {p['page']}]\n{p['text'][:3500]}"
+                            for p in topic_pages
+                        )
+                        previous_notes = "\n".join(
+                            st.session_state.get("interview_structured_notes", [])
+                        )
+                        prompt = f"""
+You are the AI-guided knowledge interview agent in DevHandover AI.
+Create ONE clear, practical interview question for the outgoing knowledge holder.
+Interview topic: {st.session_state.get('interview_topic_active', interview_topic)}
+Project: {st.session_state.get('workspace', {}).get('project', 'Unknown')}
+Successor: {st.session_state.get('workspace', {}).get('successor', 'Unknown')}
+
+Use the document excerpts to understand the project, but ask for practical
+knowledge that a successor needs and that may be missing from documentation.
+Focus on implementation details, decisions and rationale, dependencies,
+failure recovery, operational steps, edge cases, or undocumented tips.
+Do not repeat a question already covered in these notes:
+{previous_notes}
+
+Document excerpts:
+{source_context}
+
+Return only the interview question. Do not answer it.
+"""
+                        response = client.models.generate_content(
+                            model="gemini-3.5-flash-lite",
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                temperature=0.4,
+                                max_output_tokens=250
+                            )
+                        )
+                        generated_question = (response.text or "").strip()
+                        if generated_question:
+                            st.session_state["interview_pending_question"] = generated_question
+                            st.rerun()
+                        else:
+                            st.warning("Gemini did not generate a question. Try again.")
+            except Exception as error:
+                st.error("Could not generate the interview question.")
+                st.caption(f"Technical details: {error}")
+
+        pending_question = st.session_state.get("interview_pending_question", "")
+        if pending_question:
+            st.markdown("**Interview question**")
+            st.info(pending_question)
+
+            # A question-specific key prevents old form state from leaking into
+            # the next follow-up question.
+            question_form_key = "knowledge_interview_answer_" + hashlib.sha256(
+                pending_question.encode("utf-8")
+            ).hexdigest()[:12]
+            with st.form(question_form_key):
+                interview_answer = st.text_area(
+                    "Outgoing employee's answer",
+                    height=160,
+                    placeholder="Enter the knowledge holder's answer here...",
+                    key=question_form_key + "_text"
+                )
+                submit_interview_answer = st.form_submit_button(
+                    "Evaluate Answer & Generate Follow-up"
+                )
+
+            if submit_interview_answer:
+                if not interview_answer.strip():
+                    st.warning("Enter an answer before submitting.")
+                else:
+                    try:
+                        client, types = get_gemini_client()
+                        if client is None:
+                            st.error("Gemini API key not found. Check your .env file.")
+                        else:
+                            with st.spinner("Evaluating the answer and preparing a follow-up..."):
+                                prompt = f"""
+You are DevHandover AI's knowledge interview evaluator.
+Assess the answer to the interview question below.
+Return ONLY valid JSON with exactly these keys:
+{{
+  "completeness": "Complete, Partial, or Insufficient",
+  "reason": "Brief explanation of what is covered or missing",
+  "follow_up_question": "One focused follow-up question if more detail is needed, otherwise an empty string",
+  "structured_note": "A concise factual handover note based only on the answer"
+}}
+
+Rules:
+- Mark Complete only if the answer is actionable and sufficiently specific.
+- If Partial or Insufficient, ask a targeted follow-up about the missing detail.
+- Do not invent facts or fill gaps from general knowledge.
+- If the answer is vague, ask for concrete steps, names of components,
+  dependencies, commands, decision rationale, or recovery actions as appropriate.
+
+Interview topic: {st.session_state.get('interview_topic_active', interview_topic)}
+Question: {pending_question}
+Answer: {interview_answer}
+"""
+                                evaluation = client.models.generate_content(
+                                    model="gemini-3.5-flash-lite",
+                                    contents=prompt,
+                                    config=types.GenerateContentConfig(
+                                        temperature=0.2,
+                                        max_output_tokens=500,
+                                        response_mime_type="application/json"
+                                    )
+                                )
+                                raw_result = (evaluation.text or "").strip()
+                                result = json.loads(raw_result)
+                                completeness = str(
+                                    result.get("completeness", "Partial")
+                                ).strip().title()
+                                if completeness not in {"Complete", "Partial", "Insufficient"}:
+                                    completeness = "Partial"
+                                reason = str(result.get("reason", "")).strip()
+                                follow_up = str(
+                                    result.get("follow_up_question", "") or ""
+                                ).strip()
+                                structured_note = str(
+                                    result.get("structured_note", "") or ""
+                                ).strip()
+
+                                # If Gemini marks the answer incomplete but omits
+                                # its follow-up, ask it once more for a targeted question.
+                                if completeness in {"Partial", "Insufficient"} and not follow_up:
+                                    try:
+                                        followup_prompt = f"""
+Write exactly ONE concise follow-up interview question. Do not answer it.
+The answer was marked {completeness} because: {reason}
+Topic: {st.session_state.get('interview_topic_active', interview_topic)}
+Original question: {pending_question}
+Interviewee answer: {interview_answer.strip()}
+Ask only about the most important missing practical detail. Avoid asking
+for information already supplied in the answer.
+"""
+                                        followup_response = client.models.generate_content(
+                                            model="gemini-3.5-flash-lite",
+                                            contents=followup_prompt,
+                                            config=types.GenerateContentConfig(
+                                                temperature=0.2,
+                                                max_output_tokens=150
+                                            )
+                                        )
+                                        follow_up = (
+                                            followup_response.text or ""
+                                        ).strip().strip('"')
+                                    except Exception:
+                                        follow_up = ""
+
+                                    # Deterministic fallback ensures an incomplete
+                                    # answer never silently ends the interview.
+                                    if not follow_up:
+                                        follow_up = (
+                                            "Could you describe the exact steps, "
+                                            "tools or components involved, and give "
+                                            "a practical example?"
+                                        )
+
+                                if completeness == "Complete":
+                                    follow_up = ""
+
+                                save_interview_response(
+                                    active_interview_id,
+                                    pending_question,
+                                    interview_answer.strip(),
+                                    completeness,
+                                    follow_up,
+                                    structured_note
+                                )
+                                if structured_note:
+                                    st.session_state.setdefault(
+                                        "interview_structured_notes", []
+                                    ).append(structured_note)
+                                st.session_state["last_interview_evaluation"] = {
+                                    "completeness": completeness,
+                                    "reason": reason,
+                                    "follow_up": follow_up,
+                                    "note": structured_note
+                                }
+                                st.session_state["interview_pending_question"] = follow_up
+                                st.session_state["interview_last_saved_message"] = (
+                                    "Interview answer saved in SQLite."
+                                )
+                                st.rerun()
+                    except json.JSONDecodeError:
+                        st.error(
+                            "Gemini returned an unreadable evaluation. "
+                            "Please submit the answer again."
+                        )
+                    except Exception as error:
+                        st.error("Could not evaluate the interview answer.")
+                        st.caption(f"Technical details: {error}")
+
+        saved_message = st.session_state.pop("interview_last_saved_message", None)
+        if saved_message:
+            st.success(saved_message)
+
+        last_evaluation = st.session_state.get("last_interview_evaluation")
+        if last_evaluation:
+            st.subheader("Latest Answer Evaluation")
+            st.write(f"**Completeness:** {last_evaluation['completeness']}")
+            st.write(last_evaluation["reason"])
+            if last_evaluation["note"]:
+                st.markdown("**Structured handover note**")
+                st.info(last_evaluation["note"])
+            if not last_evaluation["follow_up"]:
+                st.success(
+                    "No follow-up was required for the latest answer. "
+                    "Generate the next question to continue the interview."
+                )
+
+        st.caption(
+            "Interview notes are AI-generated drafts based on the interviewee's "
+            "answer. The outgoing employee or project manager must review them."
+        )
+
+    with st.expander("Saved Interview History"):
+        interview_rows = get_interview_history(current_workspace_id())
+        if interview_rows:
+            # Display interview numbers starting at 1 within each workspace.
+            # Keep the original database IDs internally for response/evidence links.
+            display_rows = []
+            display_number_by_id = {}
+            for saved_row in interview_rows:
+                actual_interview_id = saved_row[0]
+                if actual_interview_id not in display_number_by_id:
+                    display_number_by_id[actual_interview_id] = (
+                        get_interview_display_number(
+                            current_workspace_id(), actual_interview_id
+                        )
+                    )
+                display_rows.append(
+                    (display_number_by_id[actual_interview_id],) + tuple(saved_row[1:])
+                )
+            interview_df = pd.DataFrame(
+                display_rows,
+                columns=[
+                    "Interview ID", "Topic", "Interviewee", "Status",
+                    "Interview Created", "Question", "Answer",
+                    "Completeness", "Follow-up Question",
+                    "Structured Note", "Response Created"
+                ]
+            )
+            st.dataframe(interview_df, use_container_width=True, hide_index=True)
+            notes = [
+                row[9] for row in interview_rows if row[9]
+            ]
+            if notes:
+                st.download_button(
+                    "Download Interview Notes",
+                    "\n\n".join(notes),
+                    file_name="knowledge_interview_notes.txt",
+                    mime="text/plain"
+                )
+        else:
+            st.info("No interview responses have been saved yet.")
+
+
+# ==========================================================
+# 9. EVIDENCE VERIFICATION
+# ==========================================================
+st.markdown("<div id='evidence-verification'></div>", unsafe_allow_html=True)
+st.header("6. Evidence Verification")
+st.write(
+    "Check whether knowledge captured during the outgoing employee interview "
+    "is supported by the uploaded project documentation."
+)
+st.caption(
+    "The AI compares interview answers with extracted PDF passages. "
+    "A result is a review aid, not proof that a statement is true."
+)
+
+if current_workspace_id() is None:
+    st.info("Create a workspace before verifying interview evidence.")
+elif not pages:
+    st.info("Upload project documentation before verifying evidence.")
+else:
+    evidence_interview_rows = get_interview_history(current_workspace_id())
+    evidence_candidates = [
+        row for row in evidence_interview_rows
+        if row[5] and row[6] and row[6].strip()
+    ]
+    if not evidence_candidates:
+        st.info(
+            "Complete at least one outgoing-staff interview answer before "
+            "running evidence verification."
+        )
+    else:
+        st.write(
+            f"{len(evidence_candidates)} saved interview response(s) are "
+            "available for checking."
+        )
+        if st.button(
+            "Verify Interview Answers Against PDF",
+            type="primary",
+            key="verify_interview_evidence"
+        ):
+            try:
+                client, types = get_gemini_client()
+                if client is None:
+                    st.error("Gemini API key not found. Check your .env file.")
+                else:
+                    evidence_items = []
+                    for row in evidence_candidates:
+                        question_text = row[5] or ""
+                        answer_text = row[6] or ""
+                        search_text = question_text + " " + answer_text
+                        matched = retrieve_relevant_pages(search_text, pages, max_pages=4)
+                        excerpts = "\n\n".join(
+                            f"[PDF page {item['page']}]\n{item['text'][:3500]}"
+                            for item in matched
+                        )
+                        evidence_items.append({
+                            "interview_id": row[0],
+                            "topic": row[1],
+                            "question": question_text,
+                            "answer": answer_text,
+                            "document_excerpts": excerpts or "No readable excerpts found."
+                        })
+
+                    prompt = f"""
+You are an evidence-review assistant for DevHandover AI.
+Compare each outgoing employee interview answer ONLY with the supplied PDF excerpts.
+Return ONLY valid JSON with this exact structure:
+{{
+  "results": [
+    {{
+      "interview_id": 1,
+      "status": "Supported",
+      "evidence": "Short quote or concise description of the matching evidence",
+      "pages": "1, 3",
+      "reason": "Brief explanation"
+    }}
+  ]
+}}
+Allowed status values:
+- Supported: the supplied excerpts clearly support the material claim.
+- Partially Supported: only some details are supported or the evidence is incomplete.
+- Unverified: the supplied excerpts do not provide enough evidence either way.
+- Conflicting Evidence: the supplied excerpts appear to contradict the answer.
+Rules:
+- Never use outside knowledge.
+- Do not treat absence of evidence as proof that the answer is false.
+- Cite only page numbers explicitly shown in the excerpts.
+- If no useful passage is provided, use Unverified and say so.
+- Return one result for every item, preserving interview_id.
+
+Interview answers and matching document excerpts:
+{json.dumps(evidence_items, ensure_ascii=False)}
+"""
+                    with st.spinner("Comparing interview answers with PDF evidence..."):
+                        response = client.models.generate_content(
+                            model="gemini-3.5-flash-lite",
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                temperature=0.1,
+                                max_output_tokens=2500,
+                                response_mime_type="application/json"
+                            )
+                        )
+                    parsed = json.loads((response.text or "").strip())
+                    allowed_statuses = {
+                        "Supported", "Partially Supported",
+                        "Unverified", "Conflicting Evidence"
+                    }
+                    cleaned_results = []
+                    for result in parsed.get("results", []):
+                        status = str(result.get("status", "Unverified")).strip()
+                        if status not in allowed_statuses:
+                            status = "Unverified"
+                        cleaned_results.append({
+                            "Interview ID": result.get("interview_id", ""),
+                            "Verification Status": status,
+                            "Evidence Found": str(result.get("evidence", "")),
+                            "Source Pages": str(result.get("pages", "")),
+                            "Review Notes": str(result.get("reason", ""))
+                        })
+                    st.session_state["evidence_verification_results"] = cleaned_results
+                    st.success("Evidence verification completed.")
+            except json.JSONDecodeError:
+                st.error("Gemini returned an unreadable verification result. Please try again.")
+            except Exception as error:
+                st.error("Could not complete evidence verification.")
+                st.caption(f"Technical details: {error}")
+
+        verification_results = st.session_state.get("evidence_verification_results", [])
+        if verification_results:
+            st.subheader("Evidence Verification Results")
+            verification_df = pd.DataFrame(verification_results)
+            st.dataframe(verification_df, use_container_width=True, hide_index=True)
+            counts = verification_df["Verification Status"].value_counts()
+            metric_cols = st.columns(4)
+            for col, status in zip(
+                metric_cols,
+                ["Supported", "Partially Supported", "Unverified", "Conflicting Evidence"]
+            ):
+                col.metric(status, int(counts.get(status, 0)))
+            st.download_button(
+                "Download Evidence Verification Report",
+                verification_df.to_csv(index=False),
+                file_name="evidence_verification_report.csv",
+                mime="text/csv"
+            )
+            st.warning(
+                "Review the cited PDF pages manually before accepting a claim. "
+                "The current version verifies against extracted text and may "
+                "miss scanned content, tables, or layout-dependent information."
+            )
+
+
+# ==========================================================
+# 10. PROJECT KNOWLEDGE MAP
+# ==========================================================
+st.markdown("<div id='knowledge-map'></div>", unsafe_allow_html=True)
+st.header("7. Project Knowledge Map")
+st.write(
+    "Explore how the main project knowledge areas connect to information "
+    "found in the uploaded PDF and to knowledge captured during interviews."
+)
+st.caption(
+    "This map is generated from extracted PDF text and saved interview records. "
+    "It is a navigation aid, not an automatically verified architecture diagram."
+)
+
+knowledge_map_topics = {
+    "Project Architecture": ["architecture", "system design", "module", "component", "workflow"],
+    "Technology Stack": ["technology stack", "python", "streamlit", "framework", "library", "language"],
+    "Installation & Setup": ["installation", "setup", "configuration", "environment", "getting started"],
+    "Database & Dependencies": ["database", "sqlite", "dependency", "dependencies", "storage", "schema"],
+    "Troubleshooting": ["troubleshooting", "debugging", "error", "exception", "common issues"],
+    "Team Responsibilities": ["responsibilities", "team members", "roles", "owner", "ownership"],
+    "Technical Decisions": ["technical decision", "design decision", "trade-off", "chosen because"],
+    "Risks & Limitations": ["risk", "limitation", "known issue", "constraint", "failure"],
+}
+
+if current_workspace_id() is None:
+    st.info("Create a workspace to generate its knowledge map.")
+elif not pages:
+    st.info("Upload project documentation to generate the knowledge map.")
+else:
+    knowledge_rows = []
+    graph_lines = [
+        "digraph ProjectKnowledge {",
+        'graph [rankdir="LR", bgcolor="transparent", pad="0.2", nodesep="0.35", ranksep="0.7"];',
+        'node [shape=box, style="rounded,filled", fontname="Arial", fontsize="10", color="#64748b", fillcolor="#e0f2fe", fontcolor="#0f172a"];',
+        'edge [color="#94a3b8", arrowsize="0.7"];',
+        'Project [label="Project Knowledge", shape=oval, fillcolor="#bfdbfe"];'
+    ]
+    for topic_index, (topic_name, keywords) in enumerate(knowledge_map_topics.items(), start=1):
+        matched_pages = []
+        for page_item in pages:
+            page_text = (page_item.get("text") or "").lower()
+            if any(keyword in page_text for keyword in keywords):
+                matched_pages.append(page_item.get("page"))
+        interview_matches = []
+        try:
+            all_interview_rows = get_interview_history(current_workspace_id())
+            for interview_row in all_interview_rows:
+                row_topic = str(interview_row[1] or "").lower()
+                row_question = str(interview_row[5] or "").lower()
+                if topic_name.lower() in row_topic or any(k in row_question for k in keywords):
+                    if interview_row[6] and str(interview_row[6]).strip():
+                        interview_matches.append(interview_row)
+        except Exception:
+            interview_matches = []
+
+        if matched_pages:
+            coverage = "Document evidence found"
+            page_label = ", ".join(str(number) for number in matched_pages[:12])
+        else:
+            coverage = "No matching PDF text found"
+            page_label = "—"
+        knowledge_rows.append({
+            "Knowledge Area": topic_name,
+            "PDF Evidence": coverage,
+            "Source Pages": page_label,
+            "Interview Responses": len(interview_matches)
+        })
+
+        topic_node = f"Topic{topic_index}"
+        graph_lines.append(
+            f'{topic_node} [label="{topic_name}\\n{len(matched_pages)} page(s)", '
+            f'fillcolor="{"#dcfce7" if matched_pages else "#fef3c7"}"];'
+        )
+        graph_lines.append(f"Project -> {topic_node};")
+        for page_index, page_number in enumerate(matched_pages[:3], start=1):
+            page_node = f"P{topic_index}_{page_index}"
+            graph_lines.append(
+                f'{page_node} [label="PDF page {page_number}", shape=note, fillcolor="#f1f5f9"];'
+            )
+            graph_lines.append(f"{topic_node} -> {page_node};")
+    graph_lines.append("}")
+
+    knowledge_df = pd.DataFrame(knowledge_rows)
+    found_count = sum(1 for row in knowledge_rows if row["PDF Evidence"] == "Document evidence found")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Knowledge Areas", len(knowledge_rows))
+    col2.metric("Areas with PDF Matches", found_count)
+    col3.metric("Areas Without Matches", len(knowledge_rows) - found_count)
+
+    st.subheader("Project Knowledge Relationships")
+    st.graphviz_chart("\n".join(graph_lines), use_container_width=True)
+    st.subheader("Knowledge Area Evidence Index")
+    st.dataframe(knowledge_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download Project Knowledge Map Data",
+        knowledge_df.to_csv(index=False),
+        file_name="project_knowledge_map.csv",
+        mime="text/csv"
+    )
+    st.warning(
+        "A page is linked when it contains one or more topic keywords. "
+        "This first version does not understand diagram semantics or prove "
+        "that a topic is fully documented. Review the linked pages manually."
+    )
+
+st.divider()
+
+# ==========================================================
+# 11. DOMAIN EXPERTISE MAP
+# ==========================================================
+st.markdown("<div id='expertise-map'></div>", unsafe_allow_html=True)
+st.header("8. Domain Expertise Map")
+st.write(
+    "Record which team members understand each project knowledge area, "
+    "identify single-person dependencies, and assign backup owners."
+)
+st.caption(
+    "Entries are supplied or confirmed by the project team. The application "
+    "does not infer employee expertise from names or interview text."
+)
+
+if current_workspace_id() is None:
+    st.info("Create a workspace before building its domain expertise map.")
+else:
+    workspace_details = get_workspace(current_workspace_id())
+    existing_expertise = get_domain_expertise(current_workspace_id())
+    if existing_expertise.empty:
+        outgoing_name = workspace_details[2] if workspace_details else ""
+        successor_name = workspace_details[3] if workspace_details else ""
+        expertise_seed = pd.DataFrame([
+            {"Knowledge Area": area, "Team Member": "",
+             "Expertise Level": "Not assessed", "Role": "Contributor",
+             "Backup Member": "", "Evidence / Notes": ""}
+            for area in [
+                "Project Architecture", "Technology Stack", "Installation & Setup",
+                "Database & Dependencies", "Troubleshooting",
+                "Team Responsibilities", "Technical Decisions", "Risks & Limitations"
+            ]
+        ])
+    else:
+        expertise_seed = existing_expertise
+
+    st.write("Add one row for each person and knowledge area they can support. "
+             "Use multiple rows when several people share an area.")
+    expertise_editor = st.data_editor(
+        expertise_seed,
+        key=f"domain_expertise_editor_{current_workspace_id()}",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Knowledge Area": st.column_config.TextColumn("Knowledge Area", required=True),
+            "Team Member": st.column_config.TextColumn("Team Member"),
+            "Expertise Level": st.column_config.SelectboxColumn(
+                "Expertise Level", options=["Not assessed", "Beginner", "Intermediate", "Expert"]
+            ),
+            "Role": st.column_config.SelectboxColumn(
+                "Role", options=["Contributor", "Primary Owner", "Backup Owner"]
+            ),
+            "Backup Member": st.column_config.TextColumn("Backup Member"),
+            "Evidence / Notes": st.column_config.TextColumn("Evidence / Notes")
+        }
+    )
+    if st.button("Save Domain Expertise Map", key="save_domain_expertise"):
+        save_domain_expertise(current_workspace_id(), expertise_editor)
+        st.success("Domain expertise records saved to SQLite.")
+        st.rerun()
+
+    saved_expertise = get_domain_expertise(current_workspace_id())
+    if not saved_expertise.empty:
+        valid_rows = saved_expertise[
+            saved_expertise["Team Member"].fillna("").str.strip() != ""
+        ].copy()
+        areas = sorted(saved_expertise["Knowledge Area"].dropna().unique().tolist())
+        dependency_rows = []
+        for area in areas:
+            area_rows = valid_rows[valid_rows["Knowledge Area"] == area]
+            primary_people = area_rows[
+                (area_rows["Role"] == "Primary Owner") |
+                (area_rows["Role"] == "Contributor")
+            ]["Team Member"].dropna().astype(str).str.strip().unique().tolist()
+            backup_people = area_rows[
+                (area_rows["Role"] == "Backup Owner")
+            ]["Team Member"].dropna().astype(str).str.strip().unique().tolist()
+            named_backups = area_rows["Backup Member"].dropna().astype(str).str.strip().tolist()
+            backup_people = sorted(set([x for x in backup_people + named_backups if x]))
+            if not primary_people:
+                status = "Owner not assigned"
+            elif not backup_people:
+                status = "Single-person dependency"
+            else:
+                status = "Backup identified"
+            dependency_rows.append({
+                "Knowledge Area": area,
+                "Known Team Members": ", ".join(sorted(set(primary_people))),
+                "Backup Members": ", ".join(backup_people),
+                "Dependency Status": status
+            })
+        dependency_df = pd.DataFrame(dependency_rows)
+        assigned_count = sum(1 for row in dependency_rows if row["Known Team Members"])
+        single_owner_count = sum(1 for row in dependency_rows if row["Dependency Status"] == "Single-person dependency")
+        missing_owner_count = sum(1 for row in dependency_rows if row["Dependency Status"] == "Owner not assigned")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Knowledge Areas", len(dependency_rows))
+        m2.metric("Areas With Assigned Members", assigned_count)
+        m3.metric("Single-Person Dependencies", single_owner_count)
+        st.subheader("Expertise and Backup Coverage")
+        st.dataframe(dependency_df, use_container_width=True, hide_index=True)
+        if single_owner_count:
+            st.warning(f"{single_owner_count} area(s) have a named team member but no backup. Assign and train a backup owner.")
+        if missing_owner_count:
+            st.info(f"{missing_owner_count} area(s) do not yet have a named owner. Complete the team assessment.")
+        st.download_button(
+            "Download Domain Expertise Report",
+            saved_expertise.to_csv(index=False),
+            file_name="domain_expertise_map.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("Add team members and save the map to see expertise coverage.")
+
+st.divider()
+
+# ==========================================================
+# 12. HANDOVER CHECKPOINT TRACKER
+# ==========================================================
+st.markdown("<div id='checkpoint-tracker'></div>", unsafe_allow_html=True)
+st.header("9. Handover Checkpoint Tracker")
+st.write(
+    "Track the important activities required to complete a project handover, "
+    "assign owners and due dates, and record evidence of completion."
+)
+st.caption(
+    "Checkpoint status is maintained by the project team. A checkpoint is "
+    "considered complete only when the responsible team member updates it."
+)
+
+if current_workspace_id() is None:
+    st.info("Create a workspace before adding handover checkpoints.")
+else:
+    workspace_id_for_checkpoints = current_workspace_id()
+    saved_checkpoints = get_handover_checkpoints(workspace_id_for_checkpoints)
+    if saved_checkpoints.empty:
+        checkpoint_seed = pd.DataFrame([
+            {"Checkpoint": "Project documentation reviewed",
+             "Description": "Outgoing staff and successor review the available project documents.",
+             "Owner": "", "Due Date": "", "Status": "Planned", "Evidence / Notes": ""},
+            {"Checkpoint": "Technical knowledge transferred",
+             "Description": "Architecture, technology stack, decisions and dependencies explained.",
+             "Owner": "", "Due Date": "", "Status": "Planned", "Evidence / Notes": ""},
+            {"Checkpoint": "Environment setup completed",
+             "Description": "Successor installs dependencies and runs the project.",
+             "Owner": "", "Due Date": "", "Status": "Planned", "Evidence / Notes": ""},
+            {"Checkpoint": "Troubleshooting walkthrough completed",
+             "Description": "Common failures, recovery steps and escalation paths reviewed.",
+             "Owner": "", "Due Date": "", "Status": "Planned", "Evidence / Notes": ""},
+            {"Checkpoint": "Successor readiness reviewed",
+             "Description": "Successor demonstrates understanding and manager reviews outstanding tasks.",
+             "Owner": "", "Due Date": "", "Status": "Planned", "Evidence / Notes": ""}
+        ])
+    else:
+        checkpoint_seed = saved_checkpoints
+
+    checkpoint_editor = st.data_editor(
+        checkpoint_seed,
+        key=f"handover_checkpoint_editor_{workspace_id_for_checkpoints}",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Checkpoint": st.column_config.TextColumn("Checkpoint", required=True),
+            "Description": st.column_config.TextColumn("Description"),
+            "Owner": st.column_config.TextColumn("Owner"),
+            "Due Date": st.column_config.TextColumn("Due Date (YYYY-MM-DD)"),
+            "Status": st.column_config.SelectboxColumn(
+                "Status", options=["Planned", "In Progress", "Completed", "Blocked"]
+            ),
+            "Evidence / Notes": st.column_config.TextColumn("Evidence / Notes")
+        }
+    )
+    if st.button("Save Handover Checkpoints", key="save_handover_checkpoints"):
+        save_handover_checkpoints(workspace_id_for_checkpoints, checkpoint_editor)
+        st.success("Handover checkpoints saved to SQLite.")
+        st.rerun()
+
+    checkpoint_report = get_handover_checkpoints(workspace_id_for_checkpoints)
+    if not checkpoint_report.empty:
+        total_checkpoints = len(checkpoint_report)
+        completed_checkpoints = int((checkpoint_report["Status"] == "Completed").sum())
+        blocked_checkpoints = int((checkpoint_report["Status"] == "Blocked").sum())
+        open_checkpoints = total_checkpoints - completed_checkpoints
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Checkpoints", total_checkpoints)
+        c2.metric("Completed", completed_checkpoints)
+        c3.metric("In Progress / Planned", open_checkpoints - blocked_checkpoints)
+        c4.metric("Blocked", blocked_checkpoints)
+        progress_value = completed_checkpoints / total_checkpoints if total_checkpoints else 0
+        st.progress(progress_value, text=f"Handover completion: {progress_value:.0%}")
+
+        today_text = datetime.now().date().isoformat()
+        overdue_rows = checkpoint_report[
+            (checkpoint_report["Due Date"].fillna("").astype(str).str.strip() != "") &
+            (checkpoint_report["Due Date"].astype(str) < today_text) &
+            (checkpoint_report["Status"] != "Completed")
+        ]
+        if not overdue_rows.empty:
+            st.warning(f"{len(overdue_rows)} checkpoint(s) have a due date before today and are not completed. Verify the date format (YYYY-MM-DD).")
+        if blocked_checkpoints:
+            st.error(f"{blocked_checkpoints} checkpoint(s) are marked Blocked. Review their notes and assign actions.")
+        st.subheader("Checkpoint Status")
+        st.dataframe(checkpoint_report, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download Handover Checkpoint Report",
+            checkpoint_report.to_csv(index=False),
+            file_name="handover_checkpoint_report.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("Add checkpoints and save them to track handover progress.")
+
+st.divider()
+
+st.markdown("<div id='continuity-risk'></div>", unsafe_allow_html=True)
+st.header("7. Project Continuity Risk Engine")
+st.write(
+    "Evaluate the vulnerability of important project knowledge areas."
+)
+if current_workspace_id() is None:
+    st.info("Create a workspace before calculating or saving continuity risks.")
+default_risk_data = pd.DataFrame([
+    {
+        "Knowledge Area": "System Architecture",
+        "Primary Owner": "Employee A",
+        "Backup Owner": "Employee B",
+        "Knowledge Concentration": 80,
+        "Business Impact": 90,
+        "Documentation Weakness": 65
+    },
+    {
+        "Knowledge Area": "Database Management",
+        "Primary Owner": "Employee B",
+        "Backup Owner": "Not Assigned",
+        "Knowledge Concentration": 90,
+        "Business Impact": 85,
+        "Documentation Weakness": 75
+    },
+    {
+        "Knowledge Area": "Deployment",
+        "Primary Owner": "Employee C",
+        "Backup Owner": "Employee A",
+        "Knowledge Concentration": 55,
+        "Business Impact": 80,
+        "Documentation Weakness": 40
+    },
+    {
+        "Knowledge Area": "Troubleshooting",
+        "Primary Owner": "Employee A",
+        "Backup Owner": "Not Assigned",
+        "Knowledge Concentration": 85,
+        "Business Impact": 70,
+        "Documentation Weakness": 80
+    }
+])
+if "risk_data" not in st.session_state:
+    st.session_state["risk_data"] = default_risk_data.copy()
+st.info(
+    "Default risk rows are illustrative. Edit them using your actual project assessment."
+)
+edited_risk_data = st.data_editor(
+    st.session_state["risk_data"],
+    num_rows="dynamic",
+    use_container_width=True,
+    key="risk_editor",
+    column_config={
+        "Knowledge Concentration": st.column_config.NumberColumn(
+            "Knowledge Concentration (%)",
+            min_value=0,
+            max_value=100
+        ),
+        "Business Impact": st.column_config.NumberColumn(
+            "Business Impact (%)",
+            min_value=0,
+            max_value=100
+        ),
+        "Documentation Weakness": st.column_config.NumberColumn(
+            "Documentation Weakness (%)",
+            min_value=0,
+            max_value=100
+        )
+    }
+)
+st.session_state["risk_data"] = edited_risk_data.copy()
+if st.button("Calculate Continuity Risk", disabled=current_workspace_id() is None):
+    if edited_risk_data.empty:
+        st.warning("Add at least one knowledge area.")
+    else:
+        risk_results = []
+        valid_data = True
+        for _, row in edited_risk_data.iterrows():
+            try:
+                concentration = float(row["Knowledge Concentration"])
+                impact = float(row["Business Impact"])
+                weakness = float(row["Documentation Weakness"])
+                if not all(
+                    0 <= value <= 100
+                    for value in [concentration, impact, weakness]
+                ):
+                    raise ValueError("Scores must be between 0 and 100.")
+                risk_score = (
+                    0.40 * concentration
+                    + 0.35 * impact
+                    + 0.25 * weakness
+                )
+                if risk_score < 35:
+                    risk_level = "Low"
+                elif risk_score < 65:
+                    risk_level = "Moderate"
+                else:
+                    risk_level = "High"
+                risk_results.append({
+                    "Knowledge Area": row["Knowledge Area"],
+                    "Primary Owner": row["Primary Owner"],
+                    "Backup Owner": row["Backup Owner"],
+                    "Risk Score": round(risk_score, 1),
+                    "Risk Level": risk_level
+                })
+            except (ValueError, TypeError):
+                st.error(
+                    "Risk values must be valid numbers between 0 and 100."
+                )
+                valid_data = False
+                break
+        if valid_data and risk_results:
+            risk_results_df = pd.DataFrame(risk_results)
+            st.session_state["risk_results"] = risk_results_df
+            save_risk_assessment(
+                current_workspace_id(),
+                risk_results_df
+            )
+            st.success("Risk assessment saved in SQLite!")
+if "risk_results" in st.session_state:
+    risk_results_df = st.session_state["risk_results"]
+    st.subheader("Continuity Risk Dashboard")
+    high_risks = len(
+        risk_results_df[
+            risk_results_df["Risk Level"] == "High"
+        ]
+    )
+    moderate_risks = len(
+        risk_results_df[
+            risk_results_df["Risk Level"] == "Moderate"
+        ]
+    )
+    low_risks = len(
+        risk_results_df[
+            risk_results_df["Risk Level"] == "Low"
+        ]
+    )
+    average_risk = round(
+        risk_results_df["Risk Score"].mean(),
+        1
+    )
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Average Risk", f"{average_risk}/100")
+    col2.metric("High Risk Areas", high_risks)
+    col3.metric("Moderate Risk Areas", moderate_risks)
+    col4.metric("Low Risk Areas", low_risks)
+    st.subheader("Risk Assessment Results")
+    st.dataframe(
+        risk_results_df,
+        use_container_width=True,
+        hide_index=True
+    )
+    st.subheader("Risk Score by Knowledge Area")
+    st.bar_chart(
+        risk_results_df.set_index("Knowledge Area")[["Risk Score"]]
+    )
+    st.subheader("Recommended Actions")
+    for _, row in risk_results_df.iterrows():
+        area = row["Knowledge Area"]
+        level = row["Risk Level"]
+        if level == "High":
+            st.error(
+                f"{area}: High Risk — Arrange immediate knowledge transfer, "
+                "confirm backup ownership, and document critical procedures."
+            )
+        elif level == "Moderate":
+            st.warning(
+                f"{area}: Moderate Risk — Improve documentation and "
+                "schedule knowledge-sharing sessions."
+            )
+        else:
+            st.success(
+                f"{area}: Low Risk — Maintain documentation and "
+                "periodically review backup readiness."
+            )
+    st.download_button(
+        "Download Risk Report",
+        risk_results_df.to_csv(index=False),
+        file_name="continuity_risk_report.csv",
+        mime="text/csv"
+    )
+    st.caption(
+        "Formula: 40% Knowledge Concentration + "
+        "35% Business Impact + 25% Documentation Weakness. "
+        "These are illustrative assumptions, not validated predictions."
+    )
+st.divider()
+# ==========================================================
+# 9. SUCCESSOR READINESS
+# ==========================================================
+st.markdown("<div id='readiness'></div>", unsafe_allow_html=True)
+st.header("7. Successor Readiness & Handover Verification")
+st.write(
+    "Track knowledge transfer activities and evaluate handover completion."
+)
+if current_workspace_id() is None:
+    st.info("Create a workspace before evaluating successor readiness.")
+if "readiness_data" not in st.session_state:
+    st.session_state["readiness_data"] = {
+        "documentation": False,
+        "architecture": False,
+        "setup": False,
+        "troubleshooting": False,
+        "responsibilities": False
+    }
+if "readiness_score" not in st.session_state:
+    st.session_state["readiness_score"] = None
+if "readiness_approved" not in st.session_state:
+    st.session_state["readiness_approved"] = False
+if "readiness_assessment_id" not in st.session_state:
+    st.session_state["readiness_assessment_id"] = None
+if "readiness_notes" not in st.session_state:
+    st.session_state["readiness_notes"] = {
+        "technical": "",
+        "pending": ""
+    }
+if "workspace" in st.session_state:
+    st.write(
+        f"**Successor:** {st.session_state['workspace']['successor']}"
+    )
+else:
+    st.info("Create a workspace to identify the successor.")
+with st.form("readiness_form"):
+    documentation = st.checkbox(
+        "Successor has reviewed project documentation",
+        value=st.session_state["readiness_data"]["documentation"]
+    )
+    architecture = st.checkbox(
+        "Successor understands project architecture",
+        value=st.session_state["readiness_data"]["architecture"]
+    )
+    setup = st.checkbox(
+        "Successor has completed installation and setup",
+        value=st.session_state["readiness_data"]["setup"]
+    )
+    troubleshooting = st.checkbox(
+        "Successor understands common errors and troubleshooting",
+        value=st.session_state["readiness_data"]["troubleshooting"]
+    )
+    responsibilities = st.checkbox(
+        "Successor understands project roles and responsibilities",
+        value=st.session_state["readiness_data"]["responsibilities"]
+    )
+    technical_notes = st.text_area(
+        "Important technical knowledge transferred",
+        value=st.session_state["readiness_notes"]["technical"]
+    )
+    pending_tasks = st.text_area(
+        "Tasks or knowledge areas still pending",
+        value=st.session_state["readiness_notes"]["pending"]
+    )
+    evaluate = st.form_submit_button("Evaluate Readiness", disabled=current_workspace_id() is None)
+if evaluate:
+    checklist = {
+        "documentation": documentation,
+        "architecture": architecture,
+        "setup": setup,
+        "troubleshooting": troubleshooting,
+        "responsibilities": responsibilities
+    }
+    completed = sum(checklist.values())
+    checklist_score = (completed / 5) * 70
+    notes_score = 0
+    if technical_notes.strip():
+        notes_score += 15
+    if pending_tasks.strip():
+        notes_score += 15
+    score = round(checklist_score + notes_score)
+    st.session_state["readiness_data"] = checklist
+    st.session_state["readiness_score"] = score
+    st.session_state["readiness_notes"] = {
+        "technical": technical_notes,
+        "pending": pending_tasks
+    }
+    assessment_id = save_readiness_assessment(
+        current_workspace_id(),
+        score,
+        completed,
+        technical_notes,
+        pending_tasks
+    )
+    st.session_state["readiness_assessment_id"] = assessment_id
+    st.session_state["readiness_approved"] = False
+    st.success("Readiness assessment saved in SQLite!")
+if st.session_state["readiness_score"] is not None:
+    score = st.session_state["readiness_score"]
+    completed = sum(
+        st.session_state["readiness_data"].values()
+    )
+    st.subheader("Successor Readiness Dashboard")
+    col1, col2 = st.columns(2)
+    col1.metric("Readiness Score", f"{score}/100")
+    col2.metric("Completed Activities", f"{completed}/5")
+    st.progress(score / 100)
+    if score >= 85:
+        st.success("High completion: Ready for manager review.")
+    elif score >= 60:
+        st.warning("Partial completion: More handover work is required.")
+    else:
+        st.error("Low completion: Significant handover work remains.")
+    st.subheader("Activity Status")
+    for item, status in st.session_state["readiness_data"].items():
+        if status:
+            st.write(f"✅ {item.replace('_', ' ').title()}")
+        else:
+            st.write(f"❌ {item.replace('_', ' ').title()}")
+    st.subheader("Knowledge Transfer Summary")
+    st.write(
+        st.session_state["readiness_notes"]["technical"]
+        or "No technical notes provided."
+    )
+    st.write("**Pending Tasks:**")
+    st.write(
+        st.session_state["readiness_notes"]["pending"]
+        or "No pending tasks provided."
+    )
+    st.divider()
+    st.subheader("Manager Verification")
+    manager_name = st.text_input(
+        "Manager Name",
+        key="manager_name_input"
+    )
+    if st.button("Approve Handover"):
+        assessment_id = st.session_state["readiness_assessment_id"]
+        if score < 85:
+            st.warning(
+                "Readiness score is below 85. "
+                "Complete more activities before approval."
+            )
+        elif not manager_name.strip():
+            st.warning("Enter the manager's name.")
+        elif assessment_id is None:
+            st.error("No saved readiness assessment was found.")
+        else:
+            approve_readiness(
+                assessment_id,
+                manager_name
+            )
+            st.session_state["readiness_approved"] = True
+            st.session_state["approved_manager"] = manager_name
+            st.success("Handover approved and saved in SQLite!")
+    if st.session_state["readiness_approved"]:
+        st.success("Handover approval completed!")
+        st.write(
+            f"**Approved By:** "
+            f"{st.session_state['approved_manager']}"
+        )
+        st.write(f"**Final Score:** {score}/100")
+    st.caption(
+        "This score measures recorded checklist completion, not independently "
+        "verified technical understanding. Manager approval is a demo action, "
+        "not a digital signature."
+    )
+st.divider()
+# ==========================================================
+# 10. SAVED DATABASE HISTORY
+# ==========================================================
+st.markdown("<div id='project-history'></div>", unsafe_allow_html=True)
+st.header("8. Saved Project History")
+workspace_id = current_workspace_id()
+if workspace_id is not None:
+    risks, readiness, documents = get_saved_history(workspace_id)
+    st.subheader("Saved Documents")
+    if not documents.empty:
+        st.dataframe(
+            documents,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No saved documents yet.")
+    st.subheader("Saved Risk Assessments")
+    if not risks.empty:
+        st.dataframe(
+            risks,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No saved risk assessments yet.")
+    st.subheader("Saved Successor Assessments")
+    if not readiness.empty:
+        st.dataframe(
+            readiness,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No saved readiness assessments yet.")
+else:
+    st.info("Create a workspace to view saved project history.")
+st.divider()
+# ==========================================================
+# 11. PROJECT STATUS
+# ==========================================================
+st.header("9. Project Status")
+if "workspace" in st.session_state:
+    st.success("Handover workspace is active.")
+if pages:
+    st.success("Project documentation has been processed.")
+if "risk_results" in st.session_state:
+    st.success("Continuity risk assessment completed.")
+if st.session_state["readiness_score"] is not None:
+    st.success("Successor readiness assessment completed.")
+if st.session_state["readiness_approved"]:
+    st.success("Manager approval completed.")
+st.write(
+    "DevHandover AI MVP — workspace management, PDF extraction, "
+    "Gemini-powered document Q&A, preliminary gap detection, "
+    "continuity risk scoring, successor readiness, and SQLite storage."
+)
+st.caption(
+    "Future enhancements: stronger semantic retrieval, LLM-powered handover "
+    "summaries, evidence-based successor assessments, predictive "
+    "knowledge-loss intelligence, and project management integrations."
+)
+
+
+# ==========================================================
+# 13. HANDOVER PACKAGE GENERATOR
+# ==========================================================
+def build_handover_package_pdf(workspace_id):
+    """Build a PDF handover package from the active workspace's saved records."""
+    workspace_row = get_workspace(workspace_id)
+    if not workspace_row:
+        raise ValueError("The active workspace could not be found.")
+
+    connection = get_connection()
+    document_rows = connection.execute("""
+        SELECT filename, created_at
+        FROM documents
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, (workspace_id,)).fetchall()
+    risk_rows = connection.execute("""
+        SELECT risk_data, average_risk, created_at
+        FROM risk_assessments
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, (workspace_id,)).fetchall()
+    readiness_rows = connection.execute("""
+        SELECT readiness_score, completed_activities, technical_notes,
+               pending_tasks, manager_name, approved, created_at
+        FROM readiness_assessments
+        WHERE workspace_id = ?
+        ORDER BY id DESC
+    """, (workspace_id,)).fetchall()
+    connection.close()
+
+    interview_rows = get_interview_history(workspace_id)
+    expertise_df = get_domain_expertise(workspace_id)
+    checkpoint_df = get_handover_checkpoints(workspace_id)
+
+    project_name = workspace_row[1] or "Unnamed project"
+    outgoing = workspace_row[2] or "Not specified"
+    successor_name = workspace_row[3] or "Not specified"
+    deadline = workspace_row[4] or "Not specified"
+
+    report_lines = [
+        "DEVHANDOVER AI - PROJECT HANDOVER PACKAGE",
+        "=" * 62,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "1. WORKSPACE SUMMARY",
+        f"Project: {project_name}",
+        f"Outgoing employee: {outgoing}",
+        f"Successor: {successor_name}",
+        f"Handover deadline: {deadline}",
+        "",
+        "2. PROJECT DOCUMENTATION",
+    ]
+
+    if document_rows:
+        for filename, created_at in document_rows:
+            report_lines.append(f"- {filename or 'Unnamed document'} (saved: {created_at or 'unknown'})")
+    else:
+        report_lines.append("- No project PDF is saved in this workspace.")
+
+    report_lines.extend(["", "3. KNOWLEDGE INTERVIEW SUMMARY"])
+    if interview_rows:
+        for row in interview_rows:
+            interview_id, topic, interviewee, status, created_at = row[:5]
+            question, answer, completeness = row[5:8]
+            follow_up, structured_note = row[8:10]
+            report_lines.extend([
+                f"Interview #{interview_id} | Topic: {topic or 'Not specified'}",
+                f"Interviewee: {interviewee or 'Not specified'} | Status: {status or 'Not specified'}",
+                f"Question: {question or 'Not available'}",
+                f"Answer: {answer or 'Not available'}",
+                f"Completeness: {completeness or 'Not assessed'}",
+            ])
+            if follow_up:
+                report_lines.append(f"Follow-up pending: {follow_up}")
+            if structured_note:
+                report_lines.append(f"Handover note: {structured_note}")
+            report_lines.append("")
+    else:
+        report_lines.append("No interview responses have been saved.")
+
+    report_lines.extend(["", "4. DOMAIN EXPERTISE AND BACKUP OWNERS"])
+    if not expertise_df.empty:
+        for _, row in expertise_df.iterrows():
+            report_lines.append(
+                f"- {row['Knowledge Area']}: {row['Team Member'] or 'No owner'}; "
+                f"level: {row['Expertise Level'] or 'Not assessed'}; "
+                f"role: {row['Role'] or 'Not specified'}; "
+                f"backup: {row['Backup Member'] or 'Not assigned'}"
+            )
+            if row["Evidence / Notes"]:
+                report_lines.append(f"  Notes: {row['Evidence / Notes']}")
+    else:
+        report_lines.append("No domain expertise records have been saved.")
+
+    report_lines.extend(["", "5. CONTINUITY RISK ASSESSMENTS"])
+    if risk_rows:
+        for index, (risk_json, average_risk, created_at) in enumerate(risk_rows, start=1):
+            report_lines.append(
+                f"Assessment {index} | Average risk: {average_risk}/100 | Saved: {created_at}"
+            )
+            try:
+                risk_items = json.loads(risk_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                risk_items = []
+            for item in risk_items:
+                report_lines.append(
+                    f"- {item.get('Knowledge Area', 'Area')}: "
+                    f"{item.get('Risk Score', 'N/A')}/100 "
+                    f"({item.get('Risk Level', 'Not classified')}); "
+                    f"primary: {item.get('Primary Owner', 'Not assigned')}; "
+                    f"backup: {item.get('Backup Owner', 'Not assigned')}"
+                )
+    else:
+        report_lines.append("No saved continuity risk assessment is available.")
+
+    report_lines.extend(["", "6. HANDOVER CHECKPOINTS"])
+    if not checkpoint_df.empty:
+        total = len(checkpoint_df)
+        completed_count = int((checkpoint_df["Status"] == "Completed").sum())
+        progress_percent = completed_count / total if total else 0
+        report_lines.append(
+            f"Progress: {completed_count}/{total} checkpoints completed "
+            f"({progress_percent:.0%})."
+        )
+        for _, row in checkpoint_df.iterrows():
+            report_lines.append(
+                f"- {row['Checkpoint']} | Status: {row['Status']} | "
+                f"Owner: {row['Owner'] or 'Not assigned'} | "
+                f"Due: {row['Due Date'] or 'Not set'}"
+            )
+            if row["Evidence / Notes"]:
+                report_lines.append(f"  Evidence / notes: {row['Evidence / Notes']}")
+    else:
+        report_lines.append("No handover checkpoints have been saved.")
+
+    report_lines.extend(["", "7. SUCCESSOR READINESS AND MANAGER REVIEW"])
+    if readiness_rows:
+        score, completed, technical_notes, pending_tasks, manager_name, approved, created_at = readiness_rows[0]
+        report_lines.extend([
+            f"Latest readiness score: {score}/100",
+            f"Checklist activities completed: {completed}/5",
+            f"Manager approval: {'Approved' if approved else 'Not approved'}",
+            f"Manager: {manager_name or 'Not recorded'}",
+            f"Assessment saved: {created_at or 'Unknown'}",
+            f"Technical knowledge transferred: {technical_notes or 'Not provided'}",
+            f"Pending tasks: {pending_tasks or 'None recorded'}",
+        ])
+    else:
+        report_lines.append("No successor readiness assessment has been saved.")
+
+    report_lines.extend([
+        "",
+        "8. EVIDENCE VERIFICATION",
+    ])
+    verification_results = st.session_state.get("evidence_verification_results", [])
+    if verification_results:
+        for item in verification_results:
+            report_lines.append(
+                f"- Interview #{item.get('Interview ID', 'N/A')}: "
+                f"{item.get('Verification Status', 'Not assessed')}; "
+                f"source pages: {item.get('Source Pages', 'Not specified')}; "
+                f"notes: {item.get('Review Notes', '')}"
+            )
+    else:
+        report_lines.append(
+            "No evidence verification results are available in the current app session."
+        )
+
+    report_lines.extend([
+        "",
+        "IMPORTANT REVIEW NOTES",
+        "- This package compiles records saved in the active workspace.",
+        "- Interview completeness and AI evidence checks are review aids, not proof of correctness.",
+        "- Risk scores depend on values entered by the project team.",
+        "- Expertise and checkpoint information must be confirmed by responsible team members.",
+        "- The manager should review the original documents and unresolved items before accepting the handover.",
+    ])
+
+    pdf_document = fitz.open()
+    page = pdf_document.new_page(width=595, height=842)
+    y_position = 48
+    left_margin = 48
+    body_width = 88
+
+    for line_index, raw_line in enumerate(report_lines):
+        is_heading = (
+            raw_line.startswith("DEVHANDOVER AI")
+            or (len(raw_line) > 2 and raw_line[0].isdigit() and raw_line[1:3] == ". ")
+            or raw_line == "IMPORTANT REVIEW NOTES"
+        )
+        wrapped_lines = textwrap.wrap(raw_line, width=body_width) if raw_line else [""]
+        for wrapped_line in wrapped_lines:
+            font_size = 15 if raw_line.startswith("DEVHANDOVER AI") else (11 if is_heading else 9)
+            line_height = 22 if font_size == 15 else (17 if is_heading else 13)
+            if y_position + line_height > 790:
+                page = pdf_document.new_page(width=595, height=842)
+                y_position = 48
+            if wrapped_line:
+                page.insert_text(
+                    (left_margin, y_position),
+                    wrapped_line,
+                    fontsize=font_size,
+                    fontname="helv",
+                    color=(0.12, 0.16, 0.22)
+                )
+            y_position += line_height
+
+    pdf_bytes = pdf_document.tobytes()
+    pdf_document.close()
+    return pdf_bytes
+
+
+st.divider()
+st.markdown("<div id='handover-package'></div>", unsafe_allow_html=True)
+st.header("10. Handover Package Generator")
+st.write(
+    "Compile the active workspace's saved interview notes, expertise map, "
+    "continuity risk assessments, checkpoints, documentation references, "
+    "and successor readiness into one downloadable PDF."
+)
+st.caption(
+    "The package is generated from records currently saved in SQLite. "
+    "Evidence-verification results are included only when available in this app session."
+)
+
+if current_workspace_id() is None:
+    st.info("Create or restore a workspace before generating its handover package.")
+else:
+    if st.button(
+        "Generate Handover Package PDF",
+        type="primary",
+        key="generate_handover_package"
+    ):
+        try:
+            with st.spinner("Compiling the saved handover information..."):
+                st.session_state["handover_package_pdf"] = build_handover_package_pdf(
+                    current_workspace_id()
+                )
+            st.success("Handover package generated successfully.")
+        except Exception as error:
+            st.error("Could not generate the handover package.")
+            st.caption(f"Technical details: {error}")
+
+    if st.session_state.get("handover_package_pdf"):
+        safe_project_name = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            st.session_state.get("workspace", {}).get("project", "project")
+        ).strip("_") or "project"
+        st.download_button(
+            "Download Complete Handover Package",
+            data=st.session_state["handover_package_pdf"],
+            file_name=f"{safe_project_name}_handover_package.pdf",
+            mime="application/pdf",
+            key="download_handover_package"
+        )
+
+st.divider()
+st.markdown("<div id='successor-workspace'></div>", unsafe_allow_html=True)
+st.header("11. Successor Workspace and Knowledge Q&A")
+st.write(
+    "A dedicated learning area for the incoming employee to review handover "
+    "knowledge and ask project-specific questions. Answers use uploaded PDF "
+    "content and saved outgoing-staff interview notes when available."
+)
+st.caption(
+    "The assistant must say when available sources do not contain an answer. "
+    "PDF page references are shown separately from interview-note sources."
+)
+
+workspace_id_for_successor = current_workspace_id()
+if workspace_id_for_successor is None:
+    st.info("Create or restore a handover workspace to open the successor workspace.")
+else:
+    active_workspace = st.session_state.get("workspace", {})
+    successor_display_name = active_workspace.get("successor", "Successor")
+    st.subheader(f"Welcome, {successor_display_name}")
+    st.markdown(
+        f"**Project:** {active_workspace.get('project', 'Not specified')}  \n"
+        f"**Outgoing employee:** {active_workspace.get('outgoing', 'Not specified')}  \n"
+        f"**Handover deadline:** {active_workspace.get('deadline', 'Not specified')}"
+    )
+
+    successor_question = st.text_area(
+        "What would you like to know about this project?",
+        placeholder="Example: How do I install the project and run it locally?",
+        key="successor_workspace_question",
+        height=100
+    )
+    if st.button("Ask DevHandover AI", type="primary", key="successor_ask_button"):
+        if not successor_question.strip():
+            st.warning("Enter a question before submitting.")
+        else:
+            pdf_pages_for_successor = st.session_state.get("pages", [])
+            relevant_successor_pages = retrieve_relevant_pages(
+                successor_question, pdf_pages_for_successor, max_pages=6
+            ) if pdf_pages_for_successor else []
+
+            connection = get_connection()
+            interview_note_rows = connection.execute("""
+                SELECT ki.topic, ki.interviewee, ir.question, ir.answer,
+                       ir.completeness, ir.structured_note
+                FROM knowledge_interviews ki
+                JOIN interview_responses ir ON ir.interview_id = ki.id
+                WHERE ki.workspace_id = ?
+                ORDER BY ir.id DESC LIMIT 30
+            """, (workspace_id_for_successor,)).fetchall()
+            connection.close()
+
+            interview_context_parts = []
+            for topic, interviewee, old_question, old_answer, completeness, note in interview_note_rows:
+                content = note or old_answer or ""
+                if content.strip():
+                    interview_context_parts.append(
+                        f"Topic: {topic or 'Not specified'}; Interviewee: {interviewee or 'Not specified'}; "
+                        f"Completeness: {completeness or 'Not assessed'}\n"
+                        f"Original question: {old_question or 'Not available'}\n"
+                        f"Captured knowledge: {content[:1800]}"
+                    )
+            interview_context = "\n\n".join(interview_context_parts)[:12000]
+
+            pdf_context_parts = []
+            for item in relevant_successor_pages:
+                pdf_context_parts.append(
+                    f"--- PDF SOURCE PAGE {item.get('page')} ---\n{(item.get('text') or '')[:6000]}"
+                )
+            pdf_context = "\n\n".join(pdf_context_parts)[:18000]
+
+            if not pdf_context.strip() and not interview_context.strip():
+                st.warning(
+                    "No readable PDF content or saved interview notes are available "
+                    "for this workspace yet. Upload project documentation or complete "
+                    "an outgoing-staff knowledge interview first."
+                )
+            else:
+                try:
+                    with st.spinner("Searching handover knowledge for an answer..."):
+                        client, types = get_gemini_client()
+                        if client is None:
+                            st.error("Gemini API key not found. Check your local .env file and restart the app.")
+                        else:
+                            successor_prompt = f"""
+You are the knowledge-transfer assistant inside DevHandover AI.
+Answer the successor's question using ONLY the PDF excerpts and saved interview notes below.
+Do not invent project-specific facts or use outside knowledge as if it were project evidence.
+If sources do not answer the question, say clearly: 'The available handover sources do not provide enough information to answer this.'
+You may identify exactly what should be clarified with the outgoing employee or manager.
+Cite PDF claims using [PDF Page N], only for page numbers supplied below.
+For interview-derived claims, label them [Outgoing-staff interview note]. Do not pretend interview notes are PDF evidence.
+Give practical, beginner-friendly steps only when supported by the sources.
+
+SUCCESSOR QUESTION:
+{successor_question}
+
+PDF EXCERPTS:
+{pdf_context or 'No relevant PDF excerpts were available.'}
+
+SAVED OUTGOING-STAFF INTERVIEW NOTES:
+{interview_context or 'No saved interview notes were available.'}
+"""
+                            response = client.models.generate_content(
+                                model="gemini-3.5-flash-lite",
+                                contents=successor_prompt,
+                                config=types.GenerateContentConfig(
+                                    temperature=0.2, max_output_tokens=900
+                                )
+                            )
+                            successor_answer = (response.text or "").strip()
+                            if not successor_answer:
+                                st.warning("Gemini returned an empty answer. Please try again.")
+                            else:
+                                page_numbers = [str(item.get("page")) for item in relevant_successor_pages]
+                                source_types = []
+                                if pdf_context.strip():
+                                    source_types.append("Uploaded PDF")
+                                if interview_context.strip():
+                                    source_types.append("Outgoing-staff interview notes")
+                                connection = get_connection()
+                                connection.execute("""
+                                    INSERT INTO successor_questions
+                                    (workspace_id, successor_name, question, answer, source_pages, source_types, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    workspace_id_for_successor, successor_display_name,
+                                    successor_question.strip(), successor_answer,
+                                    ", ".join(page_numbers), ", ".join(source_types),
+                                    datetime.now().isoformat()
+                                ))
+                                connection.commit()
+                                connection.close()
+                                st.session_state["successor_last_answer"] = successor_answer
+                                st.session_state["successor_last_question"] = successor_question.strip()
+                                st.session_state["successor_last_pages"] = page_numbers
+                                st.session_state["successor_last_source_types"] = source_types
+                                st.success("Your question and answer have been saved to this workspace.")
+                except Exception as error:
+                    st.error("The successor assistant could not generate an answer.")
+                    st.caption(f"Technical details: {error}")
+
+    if st.session_state.get("successor_last_answer"):
+        st.subheader("Latest Answer")
+        st.markdown(st.session_state["successor_last_answer"])
+        latest_pages = st.session_state.get("successor_last_pages", [])
+        if latest_pages:
+            st.caption("PDF pages supplied to Gemini: " + ", ".join(latest_pages))
+        latest_types = st.session_state.get("successor_last_source_types", [])
+        if latest_types:
+            st.caption("Knowledge sources: " + "; ".join(latest_types))
+
+    connection = get_connection()
+    saved_successor_qa = connection.execute("""
+        SELECT question, answer, source_pages, source_types, created_at
+        FROM successor_questions WHERE workspace_id = ?
+        ORDER BY id DESC LIMIT 10
+    """, (workspace_id_for_successor,)).fetchall()
+    connection.close()
+    st.subheader("Successor Learning History")
+    if saved_successor_qa:
+        for index, (saved_question, saved_answer, source_pages, source_types, created_at) in enumerate(saved_successor_qa, start=1):
+            with st.expander(f"{index}. {saved_question}"):
+                st.markdown(saved_answer or "No answer saved.")
+                st.caption(f"Sources: {source_types or 'Not recorded'} | PDF pages: {source_pages or 'None recorded'}")
+                st.caption(f"Asked: {created_at or 'Unknown'}")
+    else:
+        st.info("No successor questions have been saved yet. Ask the first project question above.")
+

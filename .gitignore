@@ -1,0 +1,46 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+backups/
+*.bak
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# IDE and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+# Node.js dependencies
+node_modules/
+frontend/node_modules/
+
+# Frontend build files
+frontend/dist/
+frontend/.vite/
+
+# Frontend environment secrets
+frontend/.env
+frontend/.env.*
