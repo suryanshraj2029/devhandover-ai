@@ -1,4 +1,11 @@
 # 🚀 DevHandover AI
+
+## 🚀 Live Demo
+
+**Try DevHandover AI:**  
+[Open Live Application](https://devhandover-ai.streamlit.app/)
+
+---
 ### AI-Powered Project Knowledge Continuity & Employee Handover Management Platform
 
 **DevHandover AI** is an intelligent knowledge management platform designed to prevent critical project knowledge from being lost when employees leave, change roles, or transfer responsibilities.
