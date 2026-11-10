@@ -56,6 +56,250 @@ hr { border-color:#263852 !important; }
 .dha-nav a { display:block; padding:8px 10px; margin:3px 0; border-radius:8px; color:#c5d4e6 !important; background:rgba(255,255,255,.025); font-size:13px; }
 .dha-nav a:hover { background:rgba(45,212,191,.12); color:#99f6e4 !important; }
 .dha-section-note { color:#9fb0c7; font-size:13px; }
+
+/* ======================================================
+   ACCESSIBILITY + READABILITY OVERRIDES
+   Preserve the existing navy / teal product identity.
+   ====================================================== */
+:root {
+  color-scheme: dark;
+  --dha-text: #f4f7fb;
+  --dha-muted: #c0ccda;
+  --dha-border: #40536d;
+  --dha-focus: #7dd3fc;
+}
+html { scroll-behavior: smooth; }
+body, .stApp, [data-testid="stAppViewContainer"] {
+  color: #f4f7fb !important;
+  font-size: 16px;
+}
+.stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span,
+[data-testid="stCaptionContainer"], [data-testid="stText"],
+[data-testid="stWidgetLabel"], label, .stRadio, .stCheckbox,
+[data-testid="stExpander"] summary {
+  color: #eaf1f8 !important;
+}
+.stMarkdown p, .stMarkdown li { line-height: 1.65; }
+[data-testid="stCaptionContainer"] { color: #c0ccda !important; }
+h1 { font-size: clamp(1.8rem, 3vw, 2.35rem) !important; line-height: 1.2 !important; }
+h2 { font-size: clamp(1.4rem, 2.4vw, 1.8rem) !important; line-height: 1.3 !important; }
+h3 { font-size: 1.2rem !important; line-height: 1.35 !important; }
+.dha-title { font-size: clamp(1.9rem, 3.5vw, 2.45rem) !important; line-height: 1.2 !important; }
+.dha-subtitle { color: #d5e2ef !important; line-height: 1.6 !important; }
+.dha-section-note { color: #c0ccda !important; font-size: 14px !important; line-height: 1.5; }
+/* Inputs: readable value, label, placeholder and clear focus state. */
+input, textarea, [data-baseweb="select"] > div,
+[data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input {
+  color: #f8fafc !important;
+  background-color: #172840 !important;
+  border-color: #536985 !important;
+  font-size: 16px !important;
+}
+input::placeholder, textarea::placeholder { color: #bdc9d8 !important; opacity: 1 !important; }
+[data-baseweb="select"] *, [data-testid="stSelectbox"] *,
+[data-testid="stMultiSelect"] * { color: #f4f7fb !important; }
+[data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label {
+  color: #f4f7fb !important; font-weight: 650 !important; font-size: 15px !important;
+}
+input:focus, textarea:focus, [data-baseweb="select"]:focus-within,
+button:focus-visible, a:focus-visible {
+  outline: 3px solid var(--dha-focus) !important;
+  outline-offset: 2px !important;
+  border-color: var(--dha-focus) !important;
+}
+/* Buttons are larger and easier to distinguish. */
+.stButton > button, .stDownloadButton > button,
+[data-testid="stFormSubmitButton"] button {
+  min-height: 44px;
+  padding: 0.55rem 1rem;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  border: 1px solid #5eead4 !important;
+  background: #0f766e !important;
+  color: #ffffff !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+  background: #115e59 !important; border-color: #99f6e4 !important;
+}
+/* Sidebar navigation and user identity. */
+[data-testid="stSidebar"] { border-right: 1px solid #40536d !important; }
+[data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label, [data-testid="stSidebar"] span {
+  color: #eaf1f8 !important;
+}
+.dha-nav a { font-size: 14px !important; padding: 10px 12px !important; margin: 4px 0 !important; color: #eaf1f8 !important; }
+.dha-nav a:hover { background: rgba(45,212,191,.2) !important; color: #ffffff !important; }
+/* Cards, metrics, tables and expandable sections. */
+[data-testid="stMetric"] { background: #172840 !important; border-color: #40536d !important; }
+[data-testid="stMetricLabel"] { color: #c0ccda !important; }
+[data-testid="stMetricValue"] { color: #ffffff !important; }
+[data-testid="stExpander"] { background: #14243a !important; border-color: #40536d !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border-color: #40536d !important; }
+[data-testid="stDataFrame"] *, [data-testid="stTable"] * { color: #f4f7fb; }
+hr { border-color: #40536d !important; }
+/* Status messages should remain legible against the dark background. */
+[data-testid="stAlert"] { border-radius: 10px; }
+[data-testid="stAlert"] p { color: inherit !important; }
+/* Avoid cramped controls on narrow screens. */
+@media (max-width: 768px) {
+  .block-container { padding: 1rem 1rem 2rem 1rem !important; }
+  .dha-hero { padding: 20px !important; border-radius: 14px !important; }
+  .dha-title { font-size: 1.8rem !important; }
+  .stButton > button, .stDownloadButton > button { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+}
+
+
+/* Theme-aware Light Mode overrides. Streamlit applies data-theme to the
+   document/app root; these rules override the dark-only accessibility CSS. */
+html[data-theme="light"], body[data-theme="light"],
+[data-testid="stAppViewContainer"][data-theme="light"] {
+  color-scheme: light !important;
+}
+html[data-theme="light"] .stApp,
+body[data-theme="light"] .stApp,
+[data-testid="stAppViewContainer"][data-theme="light"] {
+  background: #f5f7fb !important;
+  color: #172033 !important;
+}
+html[data-theme="light"] [data-testid="stHeader"],
+body[data-theme="light"] [data-testid="stHeader"] {
+  background: rgba(255,255,255,.96) !important;
+}
+html[data-theme="light"] [data-testid="stSidebar"],
+body[data-theme="light"] [data-testid="stSidebar"] {
+  background: #ffffff !important;
+  border-right: 1px solid #d7deea !important;
+}
+html[data-theme="light"] h1, html[data-theme="light"] h2,
+html[data-theme="light"] h3, html[data-theme="light"] p,
+html[data-theme="light"] .stMarkdown,
+html[data-theme="light"] .stMarkdown p,
+html[data-theme="light"] .stMarkdown li,
+html[data-theme="light"] [data-testid="stText"],
+html[data-theme="light"] [data-testid="stWidgetLabel"],
+html[data-theme="light"] label,
+body[data-theme="light"] h1, body[data-theme="light"] h2,
+body[data-theme="light"] h3, body[data-theme="light"] p,
+body[data-theme="light"] .stMarkdown,
+body[data-theme="light"] .stMarkdown p,
+body[data-theme="light"] .stMarkdown li,
+body[data-theme="light"] [data-testid="stText"],
+body[data-theme="light"] [data-testid="stWidgetLabel"],
+body[data-theme="light"] label {
+  color: #172033 !important;
+}
+html[data-theme="light"] [data-testid="stCaptionContainer"],
+body[data-theme="light"] [data-testid="stCaptionContainer"] {
+  color: #526174 !important;
+}
+html[data-theme="light"] input,
+html[data-theme="light"] textarea,
+html[data-theme="light"] [data-baseweb="select"] > div,
+body[data-theme="light"] input,
+body[data-theme="light"] textarea,
+body[data-theme="light"] [data-baseweb="select"] > div {
+  color: #172033 !important;
+  background: #ffffff !important;
+  border-color: #aebbd0 !important;
+}
+html[data-theme="light"] input::placeholder,
+html[data-theme="light"] textarea::placeholder,
+body[data-theme="light"] input::placeholder,
+body[data-theme="light"] textarea::placeholder {
+  color: #65748a !important;
+  opacity: 1 !important;
+}
+html[data-theme="light"] [data-baseweb="select"] *,
+html[data-theme="light"] [data-testid="stSelectbox"] *,
+html[data-theme="light"] [data-testid="stMultiSelect"] *,
+body[data-theme="light"] [data-baseweb="select"] *,
+body[data-theme="light"] [data-testid="stSelectbox"] *,
+body[data-theme="light"] [data-testid="stMultiSelect"] * {
+  color: #172033 !important;
+}
+/* BaseWeb dropdown menu and options */
+html[data-theme="light"] [data-baseweb="popover"],
+html[data-theme="light"] [role="listbox"],
+html[data-theme="light"] [role="option"],
+body[data-theme="light"] [data-baseweb="popover"],
+body[data-theme="light"] [role="listbox"],
+body[data-theme="light"] [role="option"] {
+  background: #ffffff !important;
+  color: #172033 !important;
+}
+html[data-theme="light"] [data-testid="stMetric"],
+body[data-theme="light"] [data-testid="stMetric"] {
+  background: #ffffff !important;
+  border: 1px solid #d7deea !important;
+}
+html[data-theme="light"] [data-testid="stMetricLabel"],
+html[data-theme="light"] [data-testid="stMetricValue"],
+body[data-theme="light"] [data-testid="stMetricLabel"],
+body[data-theme="light"] [data-testid="stMetricValue"] {
+  color: #172033 !important;
+}
+html[data-theme="light"] [data-testid="stExpander"],
+body[data-theme="light"] [data-testid="stExpander"] {
+  background: #ffffff !important;
+  border-color: #d7deea !important;
+}
+html[data-theme="light"] [data-testid="stDataFrame"],
+html[data-theme="light"] [data-testid="stDataEditor"],
+html[data-theme="light"] [data-testid="stTable"],
+body[data-theme="light"] [data-testid="stDataFrame"],
+body[data-theme="light"] [data-testid="stDataEditor"],
+body[data-theme="light"] [data-testid="stTable"] {
+  background: #ffffff !important;
+  border-color: #d7deea !important;
+  color: #172033 !important;
+  --gdg-bg-cell: #ffffff;
+  --gdg-bg-cell-medium: #f3f6fa;
+  --gdg-bg-header: #eef2f7;
+  --gdg-bg-header-hovered: #e3eaf3;
+  --gdg-text-dark: #172033;
+  --gdg-text-medium: #344256;
+  --gdg-text-light: #526174;
+  --gdg-border-color: #d7deea;
+  --gdg-accent-color: #0f766e;
+}
+html[data-theme="light"] [data-testid="stDataFrame"] *,
+html[data-theme="light"] [data-testid="stTable"] *,
+body[data-theme="light"] [data-testid="stDataFrame"] *,
+body[data-theme="light"] [data-testid="stTable"] * {
+  color: #172033 !important;
+}
+html[data-theme="light"] .dha-hero,
+body[data-theme="light"] .dha-hero {
+  background: linear-gradient(115deg,#e7f0f7,#edf5fb 58%,#e2f5f1) !important;
+  border-color: #c5d8e4 !important;
+}
+html[data-theme="light"] .dha-eyebrow,
+html[data-theme="light"] .dha-title,
+html[data-theme="light"] .dha-subtitle,
+html[data-theme="light"] .dha-pill,
+body[data-theme="light"] .dha-eyebrow,
+body[data-theme="light"] .dha-title,
+body[data-theme="light"] .dha-subtitle,
+body[data-theme="light"] .dha-pill {
+  color: #173047 !important;
+}
+html[data-theme="light"] .dha-nav a,
+html[data-theme="light"] [data-testid="stSidebar"] *,
+body[data-theme="light"] .dha-nav a,
+body[data-theme="light"] [data-testid="stSidebar"] * {
+  color: #243449 !important;
+}
+html[data-theme="light"] .dha-nav a,
+body[data-theme="light"] .dha-nav a { background: #f1f5f9 !important; }
+html[data-theme="light"] hr, body[data-theme="light"] hr {
+  border-color: #d7deea !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -2070,12 +2314,22 @@ Interview answers and matching document excerpts:
                         "Unverified", "Conflicting Evidence"
                     }
                     cleaned_results = []
-                    for result in parsed.get("results", []):
+                    ai_results = parsed.get("results", [])
+                    # Gemini must never determine database/display IDs. Match each
+                    # result to the saved interview response by its original order,
+                    # then show the workspace-local interview number used in history.
+                    for result_index, result in enumerate(ai_results):
+                        if result_index >= len(evidence_candidates):
+                            break
+                        source_interview_id = evidence_candidates[result_index][0]
+                        display_interview_id = get_interview_display_number(
+                            current_workspace_id(), source_interview_id
+                        )
                         status = str(result.get("status", "Unverified")).strip()
                         if status not in allowed_statuses:
                             status = "Unverified"
                         cleaned_results.append({
-                            "Interview ID": result.get("interview_id", ""),
+                            "Interview ID": display_interview_id,
                             "Verification Status": status,
                             "Evidence Found": str(result.get("evidence", "")),
                             "Source Pages": str(result.get("pages", "")),
@@ -2514,6 +2768,31 @@ if st.button("Calculate Continuity Risk", disabled=current_workspace_id() is Non
         risk_results = []
         valid_data = True
         for _, row in edited_risk_data.iterrows():
+            # Streamlit's dynamic data editor can include a trailing blank row.
+            # Ignore only rows where every field is genuinely empty.
+            row_values = [
+                row.get("Knowledge Area"),
+                row.get("Primary Owner"),
+                row.get("Backup Owner"),
+                row.get("Knowledge Concentration"),
+                row.get("Business Impact"),
+                row.get("Documentation Weakness"),
+            ]
+            def is_blank_risk_value(value):
+                if pd.isna(value):
+                    return True
+                return str(value).strip().lower() in ("", "none", "nan", "nat")
+
+            if all(is_blank_risk_value(value) for value in row_values):
+                continue
+
+            # A partially completed row is not silently ignored; report it clearly.
+            area = row.get("Knowledge Area")
+            if is_blank_risk_value(area):
+                st.error("Enter a Knowledge Area for every row containing data.")
+                valid_data = False
+                break
+
             try:
                 concentration = float(row["Knowledge Concentration"])
                 impact = float(row["Business Impact"])
@@ -2535,18 +2814,22 @@ if st.button("Calculate Continuity Risk", disabled=current_workspace_id() is Non
                 else:
                     risk_level = "High"
                 risk_results.append({
-                    "Knowledge Area": row["Knowledge Area"],
-                    "Primary Owner": row["Primary Owner"],
-                    "Backup Owner": row["Backup Owner"],
+                    "Knowledge Area": str(area).strip(),
+                    "Primary Owner": "" if is_blank_risk_value(row.get("Primary Owner")) else str(row.get("Primary Owner")).strip(),
+                    "Backup Owner": "" if is_blank_risk_value(row.get("Backup Owner")) else str(row.get("Backup Owner")).strip(),
                     "Risk Score": round(risk_score, 1),
                     "Risk Level": risk_level
                 })
             except (ValueError, TypeError):
                 st.error(
-                    "Risk values must be valid numbers between 0 and 100."
+                    "For each entered Knowledge Area, provide valid numeric "
+                    "scores between 0 and 100 for all three risk fields."
                 )
                 valid_data = False
                 break
+        if valid_data and not risk_results:
+            st.warning("Enter at least one complete knowledge-area row before calculating.")
+            valid_data = False
         if valid_data and risk_results:
             risk_results_df = pd.DataFrame(risk_results)
             st.session_state["risk_results"] = risk_results_df
