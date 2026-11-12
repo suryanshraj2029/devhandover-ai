@@ -499,6 +499,92 @@ def get_interview_history(workspace_id):
     return rows
 
 
+def get_knowledge_gaps(workspace_id):
+    """Return AI-detected knowledge gaps for one workspace."""
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT id, knowledge_area, gap_description, severity, status,
+               follow_up_question, source_question, created_at
+        FROM knowledge_gaps
+        WHERE workspace_id = ?
+        ORDER BY
+            CASE severity
+                WHEN 'Critical' THEN 1
+                WHEN 'High' THEN 2
+                WHEN 'Medium' THEN 3
+                ELSE 4
+            END,
+            id DESC
+    """, (workspace_id,)).fetchall()
+    connection.close()
+    return rows
+
+
+def save_knowledge_gap(
+    workspace_id, interview_id, knowledge_area, gap_description,
+    severity, follow_up_question, source_question, source_answer
+):
+    """Persist a gap found during an interview without changing interview history."""
+    connection = get_connection()
+    now = datetime.now().isoformat()
+    connection.execute("""
+        INSERT INTO knowledge_gaps (
+            workspace_id, interview_id, knowledge_area, gap_description,
+            severity, status, follow_up_question, source_question,
+            source_answer, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?)
+    """, (
+        workspace_id, interview_id, knowledge_area, gap_description,
+        severity, follow_up_question, source_question, source_answer, now, now
+    ))
+    connection.commit()
+    connection.close()
+
+
+def update_knowledge_gap_status(gap_id, workspace_id, status):
+    """Update only the selected gap belonging to the active workspace."""
+    connection = get_connection()
+    connection.execute("""
+        UPDATE knowledge_gaps
+        SET status = ?, updated_at = ?
+        WHERE id = ? AND workspace_id = ?
+    """, (status, datetime.now().isoformat(), gap_id, workspace_id))
+    connection.commit()
+    connection.close()
+
+
+def save_evidence_verification_results(workspace_id, results):
+    """Persist a complete evidence-verification run for the active workspace."""
+    connection = get_connection()
+    connection.execute("""
+        INSERT INTO evidence_verification_runs (workspace_id, results_json, verified_at)
+        VALUES (?, ?, ?)
+    """, (workspace_id, json.dumps(results, ensure_ascii=False), datetime.now().isoformat()))
+    connection.commit()
+    connection.close()
+
+
+def get_latest_evidence_verification(workspace_id):
+    """Load the latest saved evidence-verification run for one workspace."""
+    connection = get_connection()
+    row = connection.execute("""
+        SELECT results_json, verified_at
+        FROM evidence_verification_runs
+        WHERE workspace_id = ?
+        ORDER BY id DESC LIMIT 1
+    """, (workspace_id,)).fetchone()
+    connection.close()
+    if not row:
+        return [], None
+    try:
+        results = json.loads(row[0] or "[]")
+        if not isinstance(results, list):
+            results = []
+    except (TypeError, json.JSONDecodeError):
+        results = []
+    return results, row[1]
+
+
 def initialize_database():
     connection = get_connection()
     cursor = connection.cursor()
@@ -528,10 +614,58 @@ def initialize_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             workspace_id INTEGER,
             filename TEXT,
-            document_hash TEXT UNIQUE,
+            document_hash TEXT,
             extracted_text TEXT,
             pages_json TEXT,
             created_at TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    # Migrate older databases whose document_hash was globally UNIQUE.
+    # A PDF hash must be unique only inside its workspace, not across all workspaces.
+    document_table_sql = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='documents'"
+    ).fetchone()[0]
+    if document_table_sql and 'document_hash TEXT UNIQUE' in document_table_sql:
+        cursor.execute("ALTER TABLE documents RENAME TO documents_old_global_hash")
+        cursor.execute("""
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER,
+                filename TEXT,
+                document_hash TEXT,
+                extracted_text TEXT,
+                pages_json TEXT,
+                created_at TEXT,
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO documents (id, workspace_id, filename, document_hash,
+                                  extracted_text, pages_json, created_at)
+            SELECT id, workspace_id, filename, document_hash,
+                   extracted_text, pages_json, created_at
+            FROM documents_old_global_hash
+        """)
+        cursor.execute("DROP TABLE documents_old_global_hash")
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_workspace_hash
+        ON documents(workspace_id, document_hash)
+    """)
+    # Additive semantic index: existing document and workspace records remain untouched.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS semantic_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            document_hash TEXT NOT NULL,
+            document_name TEXT NOT NULL,
+            page_number INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            embedding_json TEXT NOT NULL,
+            embedding_model TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(workspace_id, document_hash, page_number, chunk_index, embedding_model),
             FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
         )
     """)
@@ -583,6 +717,43 @@ def initialize_database():
             created_at TEXT,
             FOREIGN KEY(interview_id) REFERENCES knowledge_interviews(id)
         )
+    """)
+    # Additive AI knowledge-gap records; existing interview and gap data remain untouched.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            interview_id INTEGER,
+            knowledge_area TEXT NOT NULL,
+            gap_description TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'Medium',
+            status TEXT NOT NULL DEFAULT 'Open',
+            follow_up_question TEXT,
+            source_question TEXT,
+            source_answer TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+            FOREIGN KEY(interview_id) REFERENCES knowledge_interviews(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_workspace_status
+        ON knowledge_gaps(workspace_id, status, severity)
+    """)
+    # Additive storage for evidence-verification runs used by the unified dashboard.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_verification_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            results_json TEXT NOT NULL,
+            verified_at TEXT NOT NULL,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_evidence_runs_workspace
+        ON evidence_verification_runs(workspace_id, id)
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS successor_questions (
@@ -823,6 +994,7 @@ def delete_workspace_and_related_data(workspace_id):
         # Remove all workspace-scoped records from the current app schema.
         for table_name in (
             "documents",
+            "semantic_chunks",
             "risk_assessments",
             "readiness_assessments",
             "successor_questions",
@@ -859,7 +1031,7 @@ def delete_workspace_and_related_data(workspace_id):
 def save_document(workspace_id, filename, document_hash,
                   extracted_text, pages):
     connection = get_connection()
-    connection.execute("""
+    cursor = connection.execute("""
         INSERT OR IGNORE INTO documents (
             workspace_id,
             filename,
@@ -877,32 +1049,45 @@ def save_document(workspace_id, filename, document_hash,
         json.dumps(pages),
         datetime.now().isoformat()
     ))
+    inserted = cursor.rowcount == 1
     connection.commit()
     connection.close()
+    return inserted
 def get_latest_document(workspace_id):
-    """Reload the latest saved PDF text and page data for a workspace."""
+    """Load all saved PDFs for a workspace while preserving each source name/page."""
     connection = get_connection()
-    row = connection.execute("""
-        SELECT document_hash, extracted_text, pages_json
+    rows = connection.execute("""
+        SELECT document_hash, filename, extracted_text, pages_json
         FROM documents
         WHERE workspace_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (workspace_id,)).fetchone()
+        ORDER BY id ASC
+    """, (workspace_id,)).fetchall()
     connection.close()
 
-    if not row:
+    if not rows:
         return None
 
-    try:
-        pages = json.loads(row[2] or "[]")
-    except (TypeError, json.JSONDecodeError):
-        pages = []
+    all_pages = []
+    all_text = []
+    document_hashes = []
+    for document_hash, filename, extracted_text, pages_json in rows:
+        document_hashes.append(document_hash)
+        if extracted_text:
+            all_text.append(f"--- DOCUMENT: {filename or 'Uploaded PDF'} ---\n{extracted_text}")
+        try:
+            document_pages = json.loads(pages_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            document_pages = []
+        for page_item in document_pages:
+            page_with_source = dict(page_item)
+            page_with_source.setdefault("document_name", filename or "Uploaded PDF")
+            all_pages.append(page_with_source)
 
     return {
-        "document_hash": row[0],
-        "extracted_text": row[1] or "",
-        "pages": pages
+        "document_hash": document_hashes[-1],
+        "document_hashes": document_hashes,
+        "extracted_text": "\n\n".join(all_text),
+        "pages": all_pages
     }
 
 
@@ -915,7 +1100,7 @@ def activate_workspace_in_session(workspace_id):
     # Remove state belonging to the previously active workspace so that
     # assessments, interview answers, and generated outputs cannot leak across workspaces.
     workspace_state_keys = [
-        "pages", "extracted_text", "document_hash", "risk_results",
+        "pages", "extracted_text", "document_hash", "document_hashes", "risk_results",
         "gemini_last_question", "gemini_last_answer", "gemini_last_sources",
         "readiness_score", "readiness_data", "readiness_assessment_id",
         "readiness_approved", "active_interview_id", "interview_pending_question",
@@ -939,6 +1124,7 @@ def activate_workspace_in_session(workspace_id):
         st.session_state["pages"] = saved_document["pages"]
         st.session_state["extracted_text"] = saved_document["extracted_text"]
         st.session_state["document_hash"] = saved_document["document_hash"]
+        st.session_state["document_hashes"] = saved_document.get("document_hashes", [saved_document["document_hash"]])
     return True
 
 
@@ -1436,77 +1622,83 @@ st.divider()
 # ==========================================================
 st.markdown("<div id='documentation'></div>", unsafe_allow_html=True)
 st.header("2. Project Documentation Upload")
-uploaded_file = st.file_uploader(
-    "Upload Project Documentation (PDF)",
+uploaded_files = st.file_uploader(
+    "Upload Project Documentation (PDFs)",
     type=["pdf"],
+    accept_multiple_files=True,
     key="project_pdf",
     disabled=current_workspace_id() is None,
-    help="Create or restore a workspace before uploading documentation."
+    help="Upload one or more project PDFs. Create or restore a workspace first."
 )
-if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    document_hash = hashlib.sha256(
-        file_bytes
-    ).hexdigest()
-    # Process only when a new PDF is selected.
-    if st.session_state.get("document_hash") != document_hash:
+if uploaded_files:
+    # Always read saved hashes for the active workspace from SQLite.
+    # Session state can contain hashes from a previously selected workspace.
+    document_connection = get_connection()
+    saved_hash_rows = document_connection.execute(
+        "SELECT document_hash FROM documents WHERE workspace_id = ?",
+        (current_workspace_id(),)
+    ).fetchall()
+    document_connection.close()
+    processed_hashes = {row[0] for row in saved_hash_rows if row[0]}
+    newly_processed = 0
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.getvalue()
+        document_hash = hashlib.sha256(file_bytes).hexdigest()
+        if document_hash in processed_hashes:
+            continue
         try:
-            pdf_document = fitz.open(
-                stream=file_bytes,
-                filetype="pdf"
-            )
-            pages = []
-            for page_number, page in enumerate(
-                pdf_document,
-                start=1
-            ):
-                pages.append({
+            pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+            document_pages = []
+            for page_number, page in enumerate(pdf_document, start=1):
+                document_pages.append({
                     "page": page_number,
+                    "document_name": uploaded_file.name,
                     "text": page.get_text()
                 })
             pdf_document.close()
-            extracted_text = "\n\n".join(
+            document_text = "\n\n".join(
                 f"--- Page {page['page']} ---\n{page['text']}"
-                for page in pages
+                for page in document_pages
             )
-            st.session_state["pages"] = pages
-            st.session_state["extracted_text"] = extracted_text
-            st.session_state["document_hash"] = document_hash
-            if extracted_text.strip():
-                save_document(
-                    current_workspace_id(),
-                    uploaded_file.name,
-                    document_hash,
-                    extracted_text,
-                    pages
+            if document_text.strip():
+                was_saved = save_document(
+                    current_workspace_id(), uploaded_file.name,
+                    document_hash, document_text, document_pages
                 )
-            st.success("PDF processed successfully!")
+                if was_saved:
+                    processed_hashes.add(document_hash)
+                    newly_processed += 1
+            else:
+                st.warning(f"No selectable text found in {uploaded_file.name}. OCR is not included.")
         except Exception as error:
-            st.error(f"PDF processing error: {error}")
-    pages = st.session_state.get("pages", [])
-    extracted_text = st.session_state.get("extracted_text", "")
-    if extracted_text.strip():
-        col1, col2 = st.columns(2)
-        col1.metric("Total Pages", len(pages))
-        col2.metric("Extracted Characters", len(extracted_text))
-        with st.expander("View Extracted Text"):
-            st.text(extracted_text[:20000])
-        st.download_button(
-            "Download Extracted Text",
-            extracted_text,
-            file_name="project_documentation.txt",
-            mime="text/plain"
-        )
-    else:
-        st.warning(
-            "No selectable text found. This PDF may be scanned. "
-            "OCR is not included in this version."
-        )
+            st.error(f"PDF processing error for {uploaded_file.name}: {error}")
+
+    saved_documents = get_latest_document(current_workspace_id())
+    if saved_documents:
+        st.session_state["pages"] = saved_documents["pages"]
+        st.session_state["extracted_text"] = saved_documents["extracted_text"]
+        st.session_state["document_hash"] = saved_documents["document_hash"]
+        st.session_state["document_hashes"] = saved_documents["document_hashes"]
+    if newly_processed:
+        st.success(f"Successfully processed {newly_processed} new PDF(s).")
+    elif saved_documents:
+        st.info("These PDFs are already saved in this workspace.")
+
+pages = st.session_state.get("pages", [])
+extracted_text = st.session_state.get("extracted_text", "")
+if extracted_text.strip():
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Documents", len(st.session_state.get("document_hashes", [])))
+    col2.metric("Total Pages", len(pages))
+    col3.metric("Extracted Characters", len(extracted_text))
+    with st.expander("View Extracted Text"):
+        st.text(extracted_text[:20000])
+    st.download_button(
+        "Download Extracted Text", extracted_text,
+        file_name="project_documentation.txt", mime="text/plain"
+    )
 else:
-    pages = st.session_state.get("pages", [])
-    extracted_text = st.session_state.get("extracted_text", "")
-    if extracted_text.strip():
-        st.info("Previously uploaded document is available in this session.")
+    st.info("Upload one or more text-based PDFs to begin. Scanned PDFs require OCR, which is not included yet.")
 pages = st.session_state.get("pages", [])
 extracted_text = st.session_state.get("extracted_text", "")
 
@@ -1517,11 +1709,11 @@ st.divider()
 st.markdown("<div id='knowledge-assistant'></div>", unsafe_allow_html=True)
 st.header("3. Gemini Project Knowledge Assistant")
 st.write(
-    "Ask questions in natural language. Gemini answers using relevant "
-    "passages from your uploaded project PDF and identifies the source pages."
+    "Ask questions in natural language. Semantic search retrieves relevant "
+    "passages across all uploaded project PDFs and Gemini cites the source document and page."
 )
 
-st.caption("The app searches extracted PDF text using expanded keyword matching, then asks Gemini to answer only from the selected pages. Scanned PDFs need OCR.")
+st.caption("The app uses Gemini embeddings for semantic retrieval, with the existing keyword search as a fallback. Scanned PDFs need OCR.")
 def get_gemini_client():
     """Create a Gemini client using the API key stored in .env."""
     from dotenv import load_dotenv
@@ -1648,6 +1840,7 @@ def retrieve_relevant_pages(question, document_pages, max_pages=8):
         if page_text.strip():
             scored_pages.append({
                 "page": item.get("page"),
+                "document_name": item.get("document_name", "Uploaded PDF"),
                 "score": score,
                 "text": page_text
             })
@@ -1671,6 +1864,181 @@ def retrieve_relevant_pages(question, document_pages, max_pages=8):
 
     return matched_pages[:max_pages]
 
+
+# ==========================================================
+# 6A. SEMANTIC DOCUMENT INDEX AND RETRIEVAL
+# ==========================================================
+EMBEDDING_MODEL = "gemini-embedding-2"
+EMBEDDING_DIMENSIONS = 768
+
+
+def split_page_into_chunks(page_text, chunk_size=1200, overlap=180):
+    """Split a PDF page into overlapping text chunks for semantic indexing."""
+    text_value = (page_text or "").strip()
+    if not text_value:
+        return []
+    chunks = []
+    start = 0
+    while start < len(text_value):
+        end = min(start + chunk_size, len(text_value))
+        if end < len(text_value):
+            # Prefer ending at a word boundary without creating tiny chunks.
+            boundary = text_value.rfind(" ", start + int(chunk_size * 0.7), end)
+            if boundary > start:
+                end = boundary
+        chunk = text_value[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text_value):
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+def get_workspace_document_hashes(workspace_id):
+    connection = get_connection()
+    rows = connection.execute(
+        "SELECT filename, document_hash FROM documents WHERE workspace_id = ?",
+        (workspace_id,)
+    ).fetchall()
+    connection.close()
+    return {filename: document_hash for filename, document_hash in rows}
+
+
+def ensure_semantic_index(workspace_id, document_pages, client, types):
+    """Create and persist embeddings only for chunks not already indexed."""
+    if not workspace_id or not document_pages:
+        return 0
+
+    document_hashes = get_workspace_document_hashes(workspace_id)
+    pending = []
+    for page_item in document_pages:
+        document_name = page_item.get("document_name", "Uploaded PDF")
+        document_hash = document_hashes.get(document_name)
+        if not document_hash:
+            fallback_source = f"{document_name}|{page_item.get('text', '')}"
+            document_hash = hashlib.sha256(fallback_source.encode("utf-8")).hexdigest()
+
+        page_number = int(page_item.get("page", 0) or 0)
+        page_chunks = split_page_into_chunks(page_item.get("text", ""))
+        for chunk_index, chunk_text in enumerate(page_chunks):
+            pending.append({
+                "document_hash": document_hash,
+                "document_name": document_name,
+                "page_number": page_number,
+                "chunk_index": chunk_index,
+                "chunk_text": chunk_text
+            })
+
+    connection = get_connection()
+    existing_rows = connection.execute("""
+        SELECT document_hash, page_number, chunk_index
+        FROM semantic_chunks
+        WHERE workspace_id = ? AND embedding_model = ?
+    """, (workspace_id, EMBEDDING_MODEL)).fetchall()
+    existing_keys = {(row[0], row[1], row[2]) for row in existing_rows}
+    pending = [
+        item for item in pending
+        if (item["document_hash"], item["page_number"], item["chunk_index"]) not in existing_keys
+    ]
+
+    created_count = 0
+    try:
+        # Keep batches modest to avoid oversized embedding requests.
+        for batch_start in range(0, len(pending), 32):
+            batch = pending[batch_start:batch_start + 32]
+            response = client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                # Gemini Embedding 2 treats a plain list of strings as parts
+                # of one combined input. Wrap each chunk as its own Content so
+                # the API returns one embedding per submitted chunk.
+                contents=[
+                    types.Content(parts=[types.Part.from_text(text=item["chunk_text"])])
+                    for item in batch
+                ],
+                config=types.EmbedContentConfig(
+                    output_dimensionality=EMBEDDING_DIMENSIONS
+                )
+            )
+            embeddings = getattr(response, "embeddings", None) or []
+            if len(embeddings) != len(batch):
+                raise ValueError("Embedding response count did not match the submitted chunks.")
+
+            for item, embedding in zip(batch, embeddings):
+                values = getattr(embedding, "values", None)
+                if not values:
+                    raise ValueError("Gemini returned an empty document embedding.")
+                connection.execute("""
+                    INSERT OR IGNORE INTO semantic_chunks (
+                        workspace_id, document_hash, document_name, page_number,
+                        chunk_index, chunk_text, embedding_json, embedding_model, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    workspace_id, item["document_hash"], item["document_name"],
+                    item["page_number"], item["chunk_index"], item["chunk_text"],
+                    json.dumps(list(values)), EMBEDDING_MODEL, datetime.now().isoformat()
+                ))
+                created_count += 1
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return created_count
+
+
+def cosine_similarity(vector_a, vector_b):
+    """Return cosine similarity without requiring an extra vector database package."""
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    magnitude_a = sum(value * value for value in vector_a) ** 0.5
+    magnitude_b = sum(value * value for value in vector_b) ** 0.5
+    if not magnitude_a or not magnitude_b:
+        return 0.0
+    return dot_product / (magnitude_a * magnitude_b)
+
+
+def retrieve_semantic_chunks(question, workspace_id, document_pages, client, types, max_chunks=8):
+    """Retrieve document chunks by embedding similarity, retaining source/page metadata."""
+    ensure_semantic_index(workspace_id, document_pages, client, types)
+    query_response = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=question,
+        config=types.EmbedContentConfig(
+            output_dimensionality=EMBEDDING_DIMENSIONS
+        )
+    )
+    query_embeddings = getattr(query_response, "embeddings", None) or []
+    if not query_embeddings or not getattr(query_embeddings[0], "values", None):
+        raise ValueError("Gemini did not return a query embedding.")
+    query_vector = list(query_embeddings[0].values)
+
+    connection = get_connection()
+    rows = connection.execute("""
+        SELECT document_name, page_number, chunk_text, embedding_json
+        FROM semantic_chunks
+        WHERE workspace_id = ? AND embedding_model = ?
+    """, (workspace_id, EMBEDDING_MODEL)).fetchall()
+    connection.close()
+
+    scored_chunks = []
+    for document_name, page_number, chunk_text, embedding_json in rows:
+        try:
+            stored_vector = json.loads(embedding_json)
+            score = cosine_similarity(query_vector, stored_vector)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        scored_chunks.append({
+            "document_name": document_name,
+            "page": page_number,
+            "text": chunk_text,
+            "similarity": score
+        })
+
+    scored_chunks.sort(key=lambda item: item["similarity"], reverse=True)
+    return scored_chunks[:max_chunks]
+
+
 if pages:
     question = st.text_input(
         "Ask a project-related question",
@@ -1681,15 +2049,14 @@ if pages:
         if not question.strip():
             st.warning("Enter a question first.")
         else:
-            relevant_pages = retrieve_relevant_pages(question, pages)
-            if not relevant_pages:
+            if not pages:
                 st.warning(
-                    "No readable text was extracted from the uploaded PDF. "
-                    "If this is a scanned PDF, OCR is required before Gemini can search it."
+                    "No readable text was extracted from the uploaded PDFs. "
+                    "If these are scanned PDFs, OCR is required before Gemini can search them."
                 )
             else:
                 try:
-                    with st.spinner("Gemini is reading the relevant project pages..."):
+                    with st.spinner("Gemini is searching your project documents..."):
                         client, types = get_gemini_client()
                         if client is None:
                             st.error(
@@ -1697,49 +2064,69 @@ if pages:
                                 "file contains GEMINI_API_KEY=your_key and restart the app."
                             )
                         else:
-                            context_parts = []
-                            for item in relevant_pages:
-                                page_text = item["text"][:7000]
-                                context_parts.append(
-                                    f"--- SOURCE PAGE {item['page']} ---\n{page_text}"
+                            try:
+                                relevant_pages = retrieve_semantic_chunks(
+                                    question, current_workspace_id(), pages, client, types
                                 )
-                            document_context = "\n\n".join(context_parts)
-                            prompt = f"""
-You are DevHandover AI, a project documentation assistant.
-Answer the user's question using ONLY the source excerpts provided below.
-Do not use outside knowledge and do not invent missing details.
-If the excerpts do not contain enough information, clearly say:
-"The uploaded document does not provide enough information to answer this."
-You may explain what information is missing.
-Cite every factual claim with the source page number in this format: [Page 2].
-Only cite page numbers that appear in the supplied excerpts.
-Keep the answer clear, practical, and easy to understand.
-Do not claim that an action, test, deployment, or configuration happened
-unless the source explicitly says so.
-USER QUESTION:
-{question}
-SOURCE EXCERPTS:
-{document_context}
-"""
-                            response = client.models.generate_content(
-                                model="gemini-3.5-flash-lite",
-                                contents=prompt,
-                                config=types.GenerateContentConfig(
-                                    temperature=0.2,
-                                    max_output_tokens=700
-                                )
-                            )
-                            answer = (response.text or "").strip()
-                            if answer:
-                                st.session_state["gemini_last_question"] = question
-                                st.session_state["gemini_last_answer"] = answer
-                                st.session_state["gemini_last_sources"] = [
-                                    item["page"] for item in relevant_pages
-                                ]
-                            else:
+                                retrieval_method = "Semantic search"
+                            except Exception as semantic_error:
+                                # Keep the existing keyword retrieval as a resilient fallback.
+                                relevant_pages = retrieve_relevant_pages(question, pages)
+                                retrieval_method = "Keyword fallback"
                                 st.warning(
-                                    "Gemini returned an empty response. Please try again."
+                                    "Semantic search was temporarily unavailable. "
+                                    "The existing keyword search is being used for this question."
                                 )
+                                st.caption(f"Semantic search detail: {semantic_error}")
+
+                            if not relevant_pages:
+                                st.warning("No relevant readable passages were found in the uploaded PDFs.")
+                            else:
+                                st.caption(f"Retrieval method: {retrieval_method}")
+                                context_parts = []
+                                for item in relevant_pages:
+                                    page_text = item["text"][:7000]
+                                    context_parts.append(
+                                        f"--- SOURCE DOCUMENT: {item.get('document_name', 'Uploaded PDF')} | PAGE {item['page']} ---\n{page_text}"
+                                    )
+                                document_context = "\n\n".join(context_parts)
+                                prompt = f"""
+    You are DevHandover AI, a project documentation assistant.
+    Answer the user's question using ONLY the source excerpts provided below.
+    Do not use outside knowledge and do not invent missing details.
+    If the excerpts do not contain enough information, clearly say:
+    "The uploaded document does not provide enough information to answer this."
+    You may explain what information is missing.
+    Cite every factual claim with source document and page in this format: [Source: filename.pdf, Page 2].
+    Only cite source names and page numbers that appear in the supplied excerpts.
+    Keep the answer clear, practical, and easy to understand.
+    Do not claim that an action, test, deployment, or configuration happened
+    unless the source explicitly says so.
+    USER QUESTION:
+    {question}
+    SOURCE EXCERPTS:
+    {document_context}
+    """
+                                response = client.models.generate_content(
+                                    model="gemini-3.5-flash-lite",
+                                    contents=prompt,
+                                    config=types.GenerateContentConfig(
+                                        temperature=0.2,
+                                        max_output_tokens=700
+                                    )
+                                )
+                                answer = (response.text or "").strip()
+                                if answer:
+                                    st.session_state["gemini_last_question"] = question
+                                    st.session_state["gemini_last_answer"] = answer
+                                    st.session_state["gemini_last_sources"] = [
+                                        {"document_name": item.get("document_name", "Uploaded PDF"), "page": item["page"]}
+                                        for item in relevant_pages
+                                    ]
+                                else:
+                                    st.warning(
+                                        "Gemini returned an empty response. Please try again."
+                                    )
                 except Exception as error:
                     st.error(
                         "Gemini could not answer this question. "
@@ -1751,10 +2138,12 @@ SOURCE EXCERPTS:
         st.markdown(st.session_state["gemini_last_answer"])
         source_pages = st.session_state.get("gemini_last_sources", [])
         if source_pages:
-            st.caption(
-                "Pages supplied to Gemini: "
-                + ", ".join(str(number) for number in source_pages)
-            )
+            source_labels = [
+                f"{item.get('document_name', 'Uploaded PDF')} · Page {item.get('page')}"
+                if isinstance(item, dict) else f"Page {item}"
+                for item in source_pages
+            ]
+            st.caption("Sources supplied to Gemini: " + "; ".join(source_labels))
         st.caption(
             "Answers are generated from retrieved PDF passages. Always verify "
             "important handover decisions against the original document."
@@ -1841,6 +2230,63 @@ if pages:
         )
 else:
     st.info("Upload a PDF to analyze knowledge gaps.")
+
+# Additional AI interview-driven gap dashboard (the original detector remains above).
+if current_workspace_id() is not None:
+    st.subheader("AI-Detected Knowledge Gaps")
+    st.caption(
+        "Gaps are recorded from Gemini's evaluation of interview answers. "
+        "Severity is an AI-assisted prioritization and should be reviewed by a manager."
+    )
+    saved_gaps = get_knowledge_gaps(current_workspace_id())
+    if saved_gaps:
+        gap_df = pd.DataFrame(
+            saved_gaps,
+            columns=[
+                "Gap ID", "Knowledge Area", "Missing / Incomplete Knowledge",
+                "Severity", "Status", "Targeted Follow-up",
+                "Interview Question", "Detected At"
+            ]
+        )
+        st.dataframe(gap_df, use_container_width=True, hide_index=True)
+
+        open_count = sum(1 for row in saved_gaps if row[4] == "Open")
+        critical_count = sum(
+            1 for row in saved_gaps
+            if row[3] in {"Critical", "High"} and row[4] == "Open"
+        )
+        gap_metric_cols = st.columns(2)
+        gap_metric_cols[0].metric("Open Knowledge Gaps", open_count)
+        gap_metric_cols[1].metric("Critical / High Open Gaps", critical_count)
+
+        with st.expander("Update a knowledge-gap status"):
+            gap_options = {
+                f"#{row[0]} · {row[1]} · {row[3]} · {row[2][:65]}": row[0]
+                for row in saved_gaps
+            }
+            selected_gap_label = st.selectbox(
+                "Select a gap", list(gap_options.keys()),
+                key="selected_ai_gap_to_update"
+            )
+            selected_gap_status = st.selectbox(
+                "New status", ["Open", "In Progress", "Resolved"],
+                key="selected_ai_gap_status"
+            )
+            if st.button("Save gap status", key="save_ai_gap_status"):
+                update_knowledge_gap_status(
+                    gap_options[selected_gap_label],
+                    current_workspace_id(),
+                    selected_gap_status
+                )
+                st.success("Knowledge-gap status updated.")
+                st.rerun()
+    else:
+        st.info(
+            "No AI interview gaps have been recorded yet. Start an AI Knowledge "
+            "Interview and submit an answer to begin detecting and tracking gaps."
+        )
+else:
+    st.info("Create a workspace to view AI-detected knowledge gaps.")
 st.divider()
 # ==========================================================
 # 8. PROJECT CONTINUITY RISK ENGINE
@@ -1970,10 +2416,22 @@ failure recovery, operational steps, edge cases, or undocumented tips.
 Do not repeat a question already covered in these notes:
 {previous_notes}
 
+IMPORTANT LANGUAGE AND SOURCE-QUALITY RULES:
+- Write clear, grammatical English using complete technical terms.
+- Do not copy OCR errors, corrupted fragments, random character strings,
+  misspellings, or unexplained tokens from the excerpts.
+- Use an acronym only when it is clearly defined or repeatedly used in the
+  source. Otherwise write the full descriptive phrase.
+- Never invent a tool, component, command, acronym, or project name.
+- If an excerpt contains unclear wording, ask about the underlying concept
+  using neutral language rather than repeating the unclear wording.
+- Before returning, check that every technical term in the question is
+  understandable and relevant to the selected interview topic.
+
 Document excerpts:
 {source_context}
 
-Return only the interview question. Do not answer it.
+Return only ONE polished interview question. Do not answer it.
 """
                         response = client.models.generate_content(
                             model="gemini-3.5-flash-lite",
@@ -2032,13 +2490,31 @@ Return ONLY valid JSON with exactly these keys:
   "completeness": "Complete, Partial, or Insufficient",
   "reason": "Brief explanation of what is covered or missing",
   "follow_up_question": "One focused follow-up question if more detail is needed, otherwise an empty string",
-  "structured_note": "A concise factual handover note based only on the answer"
+  "structured_note": "A concise factual handover note based only on the answer",
+  "knowledge_area": "A concise knowledge-area label matching the interview topic",
+  "gap_detected": true,
+  "gap_description": "Specific missing, unclear, or undocumented knowledge; empty when no gap is found",
+  "severity": "Critical, High, Medium, or Low"
 }}
 
 Rules:
 - Mark Complete only if the answer is actionable and sufficiently specific.
 - If Partial or Insufficient, ask a targeted follow-up about the missing detail.
+- Set gap_detected to true when an important detail is missing, incomplete,
+  unclear, or not actionable; otherwise false.
+- Describe the exact missing knowledge in gap_description. Do not merely repeat
+  the completeness label.
+- Classify severity based on likely handover impact: Critical = blocks safe operation
+  or essential transfer; High = major implementation/operation knowledge missing;
+  Medium = useful detail incomplete; Low = minor clarification.
+- If Partial or Insufficient, severity must not be lower than Medium.
+- If Complete and no material gap remains, use gap_detected=false and severity=Low.
 - Do not invent facts or fill gaps from general knowledge.
+- Do not repeat malformed words, OCR artifacts, random fragments, or
+  unexplained tokens from the question. Refer to the missing concept in clear,
+  neutral language instead.
+- Use only technical names and acronyms that are clearly supported by the
+  question, answer, or supplied project context.
 - If the answer is vague, ask for concrete steps, names of components,
   dependencies, commands, decision rationale, or recovery actions as appropriate.
 
@@ -2069,6 +2545,31 @@ Answer: {interview_answer}
                                 structured_note = str(
                                     result.get("structured_note", "") or ""
                                 ).strip()
+                                knowledge_area = str(
+                                    result.get("knowledge_area", "")
+                                    or st.session_state.get("interview_topic_active", interview_topic)
+                                ).strip()
+                                raw_gap_detected = result.get(
+                                    "gap_detected", completeness != "Complete"
+                                )
+                                if isinstance(raw_gap_detected, str):
+                                    gap_detected = raw_gap_detected.strip().lower() in {
+                                        "true", "yes", "1"
+                                    }
+                                else:
+                                    gap_detected = bool(raw_gap_detected)
+                                gap_description = str(
+                                    result.get("gap_description", "") or reason
+                                ).strip()
+                                severity = str(
+                                    result.get("severity", "Medium")
+                                ).strip().title()
+                                if severity not in {"Critical", "High", "Medium", "Low"}:
+                                    severity = "Medium"
+                                if completeness in {"Partial", "Insufficient"} and severity == "Low":
+                                    severity = "Medium"
+                                if completeness == "Complete":
+                                    gap_detected = bool(gap_detected and gap_description)
 
                                 # If Gemini marks the answer incomplete but omits
                                 # its follow-up, ask it once more for a targeted question.
@@ -2082,6 +2583,9 @@ Original question: {pending_question}
 Interviewee answer: {interview_answer.strip()}
 Ask only about the most important missing practical detail. Avoid asking
 for information already supplied in the answer.
+Use clear, grammatical English. Do not repeat OCR errors, malformed words,
+random fragments, or unexplained acronyms from the original question/reason.
+Never invent tool or component names; describe the missing concept neutrally.
 """
                                         followup_response = client.models.generate_content(
                                             model="gemini-3.5-flash-lite",
@@ -2117,6 +2621,21 @@ for information already supplied in the answer.
                                     follow_up,
                                     structured_note
                                 )
+
+                                # Persist the AI-detected gap separately; original
+                                # interview responses and follow-up workflow are retained.
+                                if gap_detected and gap_description:
+                                    save_knowledge_gap(
+                                        current_workspace_id(),
+                                        active_interview_id,
+                                        knowledge_area,
+                                        gap_description,
+                                        severity,
+                                        follow_up,
+                                        pending_question,
+                                        interview_answer.strip()
+                                    )
+
                                 if structured_note:
                                     st.session_state.setdefault(
                                         "interview_structured_notes", []
@@ -2125,7 +2644,11 @@ for information already supplied in the answer.
                                     "completeness": completeness,
                                     "reason": reason,
                                     "follow_up": follow_up,
-                                    "note": structured_note
+                                    "note": structured_note,
+                                    "gap_detected": gap_detected,
+                                    "gap_description": gap_description if gap_detected else "",
+                                    "severity": severity,
+                                    "knowledge_area": knowledge_area
                                 }
                                 st.session_state["interview_pending_question"] = follow_up
                                 st.session_state["interview_last_saved_message"] = (
@@ -2153,6 +2676,16 @@ for information already supplied in the answer.
             if last_evaluation["note"]:
                 st.markdown("**Structured handover note**")
                 st.info(last_evaluation["note"])
+            if last_evaluation.get("gap_detected"):
+                st.warning(
+                    f"Knowledge gap detected · {last_evaluation.get('severity', 'Medium')} · "
+                    f"{last_evaluation.get('knowledge_area', 'Knowledge area')}"
+                )
+                st.write(last_evaluation.get("gap_description", ""))
+                if last_evaluation.get("follow_up"):
+                    st.caption("Targeted follow-up: " + last_evaluation["follow_up"])
+            else:
+                st.success("No material knowledge gap was detected in this answer.")
             if not last_evaluation["follow_up"]:
                 st.success(
                     "No follow-up was required for the latest answer. "
@@ -2336,7 +2869,10 @@ Interview answers and matching document excerpts:
                             "Review Notes": str(result.get("reason", ""))
                         })
                     st.session_state["evidence_verification_results"] = cleaned_results
-                    st.success("Evidence verification completed.")
+                    save_evidence_verification_results(
+                        current_workspace_id(), cleaned_results
+                    )
+                    st.success("Evidence verification completed and saved in SQLite.")
             except json.JSONDecodeError:
                 st.error("Gemini returned an unreadable verification result. Please try again.")
             except Exception as error:
@@ -2344,6 +2880,13 @@ Interview answers and matching document excerpts:
                 st.caption(f"Technical details: {error}")
 
         verification_results = st.session_state.get("evidence_verification_results", [])
+        if not verification_results:
+            saved_verification_results, _ = get_latest_evidence_verification(
+                current_workspace_id()
+            )
+            if saved_verification_results:
+                verification_results = saved_verification_results
+                st.session_state["evidence_verification_results"] = saved_verification_results
         if verification_results:
             st.subheader("Evidence Verification Results")
             verification_df = pd.DataFrame(verification_results)
@@ -3074,7 +3617,197 @@ if st.session_state["readiness_score"] is not None:
     )
 st.divider()
 # ==========================================================
-# 10. SAVED DATABASE HISTORY
+# 10. EVIDENCE-BASED HANDOVER RISK & READINESS DASHBOARD
+# ==========================================================
+st.markdown("<div id='handover-dashboard'></div>", unsafe_allow_html=True)
+st.header("8. Evidence-Based Handover Risk & Readiness Dashboard")
+st.write(
+    "A unified view of unresolved knowledge gaps, evidence-verification results, "
+    "continuity risk, and successor preparation. This dashboard reads the "
+    "existing workspace records and does not replace their individual modules."
+)
+
+if current_workspace_id() is None:
+    st.info("Create or select a workspace to view the unified handover dashboard.")
+else:
+    dashboard_workspace_id = current_workspace_id()
+    dashboard_gaps = get_knowledge_gaps(dashboard_workspace_id)
+    dashboard_evidence, dashboard_evidence_at = get_latest_evidence_verification(
+        dashboard_workspace_id
+    )
+
+    dashboard_connection = get_connection()
+    latest_risk_row = dashboard_connection.execute("""
+        SELECT risk_data, average_risk, created_at
+        FROM risk_assessments
+        WHERE workspace_id = ? ORDER BY id DESC LIMIT 1
+    """, (dashboard_workspace_id,)).fetchone()
+    latest_readiness_row = dashboard_connection.execute("""
+        SELECT readiness_score, completed_activities, technical_notes,
+               pending_tasks, manager_name, approved, created_at
+        FROM readiness_assessments
+        WHERE workspace_id = ? ORDER BY id DESC LIMIT 1
+    """, (dashboard_workspace_id,)).fetchone()
+    dashboard_connection.close()
+
+    open_gaps = [gap for gap in dashboard_gaps if gap[4] != "Resolved"]
+    critical_high_gaps = [gap for gap in open_gaps if gap[3] in ("Critical", "High")]
+    unverified_evidence = [
+        item for item in dashboard_evidence
+        if item.get("Verification Status") in ("Unverified", "Partially Supported", "Conflicting Evidence")
+    ]
+    supported_evidence_count = sum(
+        1 for item in dashboard_evidence
+        if item.get("Verification Status") == "Supported"
+    )
+
+    risk_items = []
+    average_risk_value = None
+    risk_saved_at = None
+    if latest_risk_row:
+        risk_json, average_risk_value, risk_saved_at = latest_risk_row
+        try:
+            risk_items = json.loads(risk_json or "[]")
+            if not isinstance(risk_items, list):
+                risk_items = []
+        except (TypeError, json.JSONDecodeError):
+            risk_items = []
+
+    readiness_score_value = None
+    readiness_completed_value = None
+    readiness_manager = None
+    readiness_approved_value = False
+    readiness_saved_at = None
+    readiness_pending_text = ""
+    if latest_readiness_row:
+        (readiness_score_value, readiness_completed_value, readiness_technical,
+         readiness_pending_text, readiness_manager, readiness_approved_value,
+         readiness_saved_at) = latest_readiness_row
+
+    dash_cols = st.columns(4)
+    dash_cols[0].metric("Open Knowledge Gaps", len(open_gaps))
+    dash_cols[1].metric("Critical / High Gaps", len(critical_high_gaps))
+    dash_cols[2].metric("Evidence Items Needing Review", len(unverified_evidence))
+    dash_cols[3].metric(
+        "Successor Readiness",
+        f"{readiness_score_value}/100" if readiness_score_value is not None else "Not assessed"
+    )
+
+    st.subheader("Continuity and evidence status")
+    status_cols = st.columns(3)
+    status_cols[0].metric(
+        "Latest Average Risk",
+        f"{float(average_risk_value):.1f}/100" if average_risk_value is not None else "Not assessed"
+    )
+    status_cols[1].metric("Evidence Supported", supported_evidence_count)
+    status_cols[2].metric(
+        "Manager Approval",
+        "Approved" if readiness_approved_value else "Pending"
+    )
+
+    if dashboard_gaps:
+        st.subheader("Knowledge gaps requiring attention")
+        gap_dashboard_df = pd.DataFrame([
+            {
+                "Gap ID": gap[0],
+                "Knowledge Area": gap[1],
+                "Missing Knowledge": gap[2],
+                "Severity": gap[3],
+                "Status": gap[4],
+                "Follow-up": gap[5] or "Not recorded"
+            }
+            for gap in dashboard_gaps
+        ])
+        st.dataframe(gap_dashboard_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No AI-detected knowledge gaps have been saved for this workspace yet.")
+
+    if dashboard_evidence:
+        st.subheader("Evidence verification requiring review")
+        evidence_dashboard_df = pd.DataFrame(dashboard_evidence)
+        st.dataframe(evidence_dashboard_df, use_container_width=True, hide_index=True)
+        st.caption(f"Latest evidence run: {dashboard_evidence_at or 'Timestamp unavailable'}")
+    else:
+        st.info("No evidence-verification run has been saved for this workspace yet.")
+
+    if risk_items:
+        st.subheader("Highest continuity-risk areas")
+        risk_dashboard_df = pd.DataFrame(risk_items)
+        if "Risk Score" in risk_dashboard_df.columns:
+            risk_dashboard_df = risk_dashboard_df.sort_values(
+                "Risk Score", ascending=False
+            )
+        st.dataframe(risk_dashboard_df, use_container_width=True, hide_index=True)
+        st.caption(
+            f"Latest risk assessment: {risk_saved_at or 'Timestamp unavailable'}. "
+            "Risk scores use the existing illustrative 40% / 35% / 25% formula."
+        )
+    else:
+        st.info("No saved continuity-risk assessment is available yet.")
+
+    if latest_readiness_row:
+        st.subheader("Successor preparation")
+        st.write(
+            f"Checklist activities completed: {readiness_completed_value}/5. "
+            f"Manager approval: {'Approved' if readiness_approved_value else 'Not approved'}."
+        )
+        if readiness_pending_text and readiness_pending_text.strip():
+            st.warning(f"Pending successor tasks: {readiness_pending_text}")
+        st.caption(
+            f"Latest readiness assessment: {readiness_saved_at or 'Timestamp unavailable'}. "
+            "The score reflects recorded checklist completion, not independently tested competence."
+        )
+    else:
+        st.info("Successor readiness has not yet been assessed.")
+
+    st.subheader("Recommended continuity action plan")
+    action_count = 0
+    for gap in critical_high_gaps:
+        st.error(
+            f"Resolve {gap[3]} gap in {gap[1]}: {gap[2]} "
+            f"Next step: {gap[5] or 'Assign an owner and capture the missing knowledge.'}"
+        )
+        action_count += 1
+    for item in unverified_evidence:
+        st.warning(
+            f"Review interview #{item.get('Interview ID', 'N/A')} evidence "
+            f"({item.get('Verification Status', 'Needs review')}). Check source pages "
+            f"{item.get('Source Pages') or 'not specified'} against the original PDF."
+        )
+        action_count += 1
+    if risk_items:
+        for item in sorted(
+            risk_items,
+            key=lambda value: float(value.get("Risk Score", 0) or 0),
+            reverse=True
+        )[:3]:
+            if item.get("Risk Level") in ("High", "Moderate"):
+                st.warning(
+                    f"Strengthen {item.get('Knowledge Area', 'this knowledge area')}: "
+                    f"{item.get('Risk Level')} continuity risk ({item.get('Risk Score', 'N/A')}/100). "
+                    "Confirm a backup owner and document critical procedures."
+                )
+                action_count += 1
+    if readiness_score_value is None:
+        st.info("Action: complete the successor-readiness checklist and record pending tasks.")
+        action_count += 1
+    elif not readiness_approved_value:
+        st.info("Action: manager should review unresolved gaps, evidence, and readiness before approval.")
+        action_count += 1
+    if action_count == 0:
+        st.success(
+            "No open high-priority actions were identified from the currently saved records. "
+            "Continue periodic review with the project team."
+        )
+
+    st.caption(
+        "This dashboard consolidates saved app records to support decisions. "
+        "It does not independently prove that knowledge is correct or that a successor is competent."
+    )
+
+st.divider()
+# ==========================================================
+# 11. SAVED DATABASE HISTORY
 # ==========================================================
 st.markdown("<div id='project-history'></div>", unsafe_allow_html=True)
 st.header("8. Saved Project History")
