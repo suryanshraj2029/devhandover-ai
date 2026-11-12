@@ -983,20 +983,28 @@ def delete_workspace_and_related_data(workspace_id):
     try:
         cursor = connection.cursor()
 
-        # interview_responses belongs to interviews, so remove it first.
+        # Child records must be removed before their parent records because
+        # SQLite foreign-key enforcement is enabled for every connection.
+        # Interview responses and knowledge gaps both reference interviews.
         cursor.execute("""
             DELETE FROM interview_responses
             WHERE interview_id IN (
                 SELECT id FROM knowledge_interviews WHERE workspace_id = ?
             )
         """, (workspace_id,))
+        cursor.execute(
+            "DELETE FROM knowledge_gaps WHERE workspace_id = ?",
+            (workspace_id,)
+        )
 
-        # Remove all workspace-scoped records from the current app schema.
+        # These records directly reference the workspace and must be removed
+        # before the workspace row itself.
         for table_name in (
             "documents",
             "semantic_chunks",
             "risk_assessments",
             "readiness_assessments",
+            "evidence_verification_runs",
             "successor_questions",
             "domain_expertise",
             "handover_checkpoints",
